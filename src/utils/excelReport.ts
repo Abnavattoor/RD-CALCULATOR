@@ -285,4 +285,4 @@ export const generateExcelReport = (data: RDAccountData) => {
   // ============================================================
 
   XLSX.writeFile(workbook, fileName);
-};
+};  

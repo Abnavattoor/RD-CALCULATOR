@@ -106,11 +106,115 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
 
   const contributionDescription = isMonthly
     ? 'Average amount contributed per valid deposit'
-    : 'Total Deposited ÷ 365';
+    : 'Profit-Eligible Amount ÷ 365';
 
   const totalInterestDescription = isMonthly
-    ? 'Progressive interest across monthly installments'
+    ? 'Progressive interest on profit-eligible installments'
     : 'Progressive interest across the calculation period';
+
+  // ========================================================================
+  // NON-PROFIT AMOUNT
+  // ========================================================================
+
+  const nonProfitAmount = data.nonProfitAmount || 0;
+
+  const profitEligibleAmount =
+    data.profitEligibleAmount !== undefined
+      ? data.profitEligibleAmount
+      : Math.max(
+          0,
+          data.totalDeposited - nonProfitAmount
+        );
+
+  // ========================================================================
+  // MONTHLY RD - LAST PROFITABLE PAYMENT DATE
+  // ========================================================================
+  //
+  // Maturity Date - 15 days
+  //
+  // Example:
+  // Maturity = 20-Aug-2026
+  // Last profitable payment = 05-Aug-2026
+  //
+  // ========================================================================
+
+  const getLastProfitablePaymentDate = (): string | null => {
+    if (!isMonthly || !data.maturityDate) {
+      return null;
+    }
+
+    const text = String(data.maturityDate).trim();
+
+    if (!text) {
+      return null;
+    }
+
+    let maturityDate: Date | null = null;
+
+    // YYYY-MM-DD
+    let match = text.match(
+      /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/
+    );
+
+    if (match) {
+      maturityDate = new Date(
+        Number(match[1]),
+        Number(match[2]) - 1,
+        Number(match[3])
+      );
+    }
+
+    // DD-MM-YYYY / DD/MM/YYYY
+    if (!maturityDate || Number.isNaN(maturityDate.getTime())) {
+      match = text.match(
+        /^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/
+      );
+
+      if (match) {
+        maturityDate = new Date(
+          Number(match[3]),
+          Number(match[2]) - 1,
+          Number(match[1])
+        );
+      }
+    }
+
+    // Native date parsing fallback
+    if (!maturityDate || Number.isNaN(maturityDate.getTime())) {
+      const parsed = new Date(text);
+
+      if (!Number.isNaN(parsed.getTime())) {
+        maturityDate = new Date(
+          parsed.getFullYear(),
+          parsed.getMonth(),
+          parsed.getDate()
+        );
+      }
+    }
+
+    if (!maturityDate || Number.isNaN(maturityDate.getTime())) {
+      return null;
+    }
+
+    maturityDate.setDate(
+      maturityDate.getDate() - 15
+    );
+
+    const day = String(
+      maturityDate.getDate()
+    ).padStart(2, '0');
+
+    const month = String(
+      maturityDate.getMonth() + 1
+    ).padStart(2, '0');
+
+    const year = maturityDate.getFullYear();
+
+    return `${day}-${month}-${year}`;
+  };
+
+  const lastProfitablePaymentDate =
+    getLastProfitablePaymentDate();
 
   // ========================================================================
   // PDF REPORT
@@ -120,8 +224,14 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
     try {
       generateRDReport(data);
     } catch (error) {
-      console.error('Failed to generate PDF report:', error);
-      alert('Unable to generate the PDF report. Please try again.');
+      console.error(
+        'Failed to generate PDF report:',
+        error
+      );
+
+      alert(
+        'Unable to generate the PDF report. Please try again.'
+      );
     }
   };
 
@@ -133,8 +243,14 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
     try {
       generateExcelReport(data);
     } catch (error) {
-      console.error('Failed to generate Excel report:', error);
-      alert('Unable to generate the Excel report. Please try again.');
+      console.error(
+        'Failed to generate Excel report:',
+        error
+      );
+
+      alert(
+        'Unable to generate the Excel report. Please try again.'
+      );
     }
   };
 
@@ -164,7 +280,9 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
               <div className="flex items-center gap-2 mb-2">
 
                 <div className="w-9 h-9 rounded-lg bg-blue-50 flex items-center justify-center">
+
                   <Calculator className="w-5 h-5 text-blue-600" />
+
                 </div>
 
                 <span className="text-xs font-bold uppercase tracking-widest text-blue-600">
@@ -178,9 +296,11 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
               </h2>
 
               <p className="text-sm text-gray-500 mt-1">
+
                 {isMonthly
                   ? 'Monthly RD Progressive Interest Calculation'
                   : 'Daily RD Normalized Progressive Interest Calculation'}
+
               </p>
 
             </div>
@@ -283,9 +403,19 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
 
         <div className="px-6 sm:px-8 pt-6">
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div
+            className={`
+              grid
+              grid-cols-1
+              sm:grid-cols-2
+              ${isDaily || isMonthly ? 'lg:grid-cols-5' : 'lg:grid-cols-4'}
+              gap-4
+            `}
+          >
 
-            {/* TOTAL DEPOSITED */}
+            {/* ==============================================================
+                TOTAL DEPOSITED
+            ============================================================== */}
 
             <div className="rounded-xl bg-gray-50 border border-gray-200 p-5">
 
@@ -317,7 +447,9 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
 
             </div>
 
-            {/* CONTRIBUTION */}
+            {/* ==============================================================
+                CONTRIBUTION
+            ============================================================== */}
 
             <div className="rounded-xl bg-blue-50 border border-blue-200 p-5">
 
@@ -338,12 +470,16 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
               </div>
 
               <p className="text-xs text-blue-700 mt-2">
+
                 {contributionDescription}
+
               </p>
 
             </div>
 
-            {/* INTEREST RATE */}
+            {/* ==============================================================
+                INTEREST RATE
+            ============================================================== */}
 
             <div className="rounded-xl bg-amber-50 border border-amber-200 p-5">
 
@@ -369,7 +505,46 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
 
             </div>
 
-            {/* TOTAL INTEREST */}
+            {/* ==============================================================
+                NON-PROFIT AMOUNT
+                DAILY + MONTHLY
+            ============================================================== */}
+
+            {(isDaily || isMonthly) && (
+
+              <div className="rounded-xl bg-orange-50 border border-orange-200 p-5">
+
+                <div className="flex items-center justify-between mb-3">
+
+                  <span className="text-xs font-bold uppercase tracking-wider text-orange-800">
+                    Non-Profit Amount
+                  </span>
+
+                  <Wallet className="w-4 h-4 text-orange-500" />
+
+                </div>
+
+                <div className="text-2xl font-bold font-mono text-orange-950">
+
+                  {formatCurrency(nonProfitAmount)}
+
+                </div>
+
+                <p className="text-xs text-orange-700 mt-2 leading-relaxed">
+
+                  {isDaily
+                    ? 'Late / excess payment not eligible for Daily RD profit.'
+                    : 'Payment made during the 15-day relaxation period is not eligible for Monthly RD profit.'}
+
+                </p>
+
+              </div>
+
+            )}
+
+            {/* ==============================================================
+                TOTAL INTEREST
+            ============================================================== */}
 
             <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-5">
 
@@ -390,7 +565,9 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
               </div>
 
               <p className="text-xs text-emerald-700 mt-2">
+
                 {totalInterestDescription}
+
               </p>
 
             </div>
@@ -398,6 +575,71 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
           </div>
 
         </div>
+
+        {/* ==================================================================
+            MONTHLY RD RELAXATION INFORMATION
+        ================================================================== */}
+
+        {isMonthly && (
+
+          <div className="px-6 sm:px-8 pt-6">
+
+            <div className="rounded-xl bg-orange-50 border border-orange-200 p-5">
+
+              <div className="flex items-start gap-3">
+
+                <div className="w-9 h-9 rounded-lg bg-orange-100 flex items-center justify-center shrink-0">
+
+                  <CalendarDays className="w-4 h-4 text-orange-600" />
+
+                </div>
+
+                <div className="flex-1">
+
+                  <h3 className="text-sm font-bold text-orange-900">
+                    Monthly RD 15-Day Relaxation Rule
+                  </h3>
+
+                  {lastProfitablePaymentDate ? (
+
+                    <p className="text-xs text-orange-800 mt-1.5 leading-relaxed">
+
+                      The last profitable payment date is{' '}
+
+                      <strong>
+                        {lastProfitablePaymentDate}
+                      </strong>
+
+                      . Payments made after this date and within the
+                      15-day period before maturity are accepted, but
+                      that payment becomes Non-Profit and does not earn
+                      Monthly RD profit.
+
+                    </p>
+
+                  ) : (
+
+                    <p className="text-xs text-orange-800 mt-1.5 leading-relaxed">
+
+                      The final Monthly RD installment should be paid
+                      15 days before the maturity date. A payment made
+                      during the final 15-day relaxation period is
+                      accepted but becomes Non-Profit and does not earn
+                      Monthly RD profit.
+
+                    </p>
+
+                  )}
+
+                </div>
+
+              </div>
+
+            </div>
+
+          </div>
+
+        )}
 
         {/* ==================================================================
             MATURITY BREAKDOWN
@@ -425,6 +667,8 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
 
               <div className="space-y-3 text-sm">
 
+                {/* TOTAL DEPOSITED */}
+
                 <div className="flex items-center justify-between gap-4">
 
                   <span className="text-gray-600">
@@ -437,6 +681,44 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
 
                 </div>
 
+                {/* PROFIT ELIGIBLE */}
+
+                {(isDaily || isMonthly) && (
+
+                  <div className="flex items-center justify-between gap-4">
+
+                    <span className="text-gray-600">
+                      Profit-Eligible Amount
+                    </span>
+
+                    <span className="font-semibold font-mono text-blue-700">
+                      {formatCurrency(profitEligibleAmount)}
+                    </span>
+
+                  </div>
+
+                )}
+
+                {/* NON-PROFIT */}
+
+                {(isDaily || isMonthly) && nonProfitAmount > 0 && (
+
+                  <div className="flex items-center justify-between gap-4">
+
+                    <span className="text-orange-700">
+                      Non-Profit Amount
+                    </span>
+
+                    <span className="font-semibold font-mono text-orange-700">
+                      {formatCurrency(nonProfitAmount)}
+                    </span>
+
+                  </div>
+
+                )}
+
+                {/* TOTAL INTEREST */}
+
                 <div className="flex items-center justify-between gap-4">
 
                   <span className="text-gray-600">
@@ -448,6 +730,8 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
                   </span>
 
                 </div>
+
+                {/* FINAL MATURITY */}
 
                 <div className="border-t border-gray-200 pt-3 flex items-center justify-between gap-4">
 
@@ -527,11 +811,13 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
 
             </div>
 
-            {/* MONTHLY RD */}
+            {/* ==============================================================
+                MONTHLY RD
+            ============================================================== */}
 
             {isMonthly ? (
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
 
                 {/* STEP 1 */}
 
@@ -570,17 +856,17 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
                     </span>
 
                     <span className="font-semibold text-gray-900 text-sm">
-                      Progressive Interest
+                      15-Day Cutoff
                     </span>
 
                   </div>
 
                   <p className="text-gray-600 leading-relaxed font-mono text-[11px]">
-                    Interest = Installment × Monthly Rate × Months Remaining
+                    Last Profitable Date = Maturity Date − 15 Days
                   </p>
 
                   <p className="text-gray-500 mt-2 text-[11px] leading-relaxed">
-                    Earlier installments earn interest for more months than later installments.
+                    Payments made after this date during the relaxation period become Non-Profit.
                   </p>
 
                 </div>
@@ -596,6 +882,32 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
                     </span>
 
                     <span className="font-semibold text-gray-900 text-sm">
+                      Progressive Interest
+                    </span>
+
+                  </div>
+
+                  <p className="text-gray-600 leading-relaxed font-mono text-[11px]">
+                    Interest = Eligible Installment × Monthly Rate × Months Remaining
+                  </p>
+
+                  <p className="text-gray-500 mt-2 text-[11px] leading-relaxed">
+                    Only profit-eligible installments participate in the Monthly RD interest calculation.
+                  </p>
+
+                </div>
+
+                {/* STEP 4 */}
+
+                <div className="bg-white p-4 rounded-lg border border-gray-200">
+
+                  <div className="flex items-center gap-2 mb-2">
+
+                    <span className="w-6 h-6 rounded-full bg-blue-50 text-blue-700 flex items-center justify-center text-xs font-bold">
+                      4
+                    </span>
+
+                    <span className="font-semibold text-gray-900 text-sm">
                       Final Maturity
                     </span>
 
@@ -606,7 +918,7 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
                   </p>
 
                   <p className="text-gray-500 mt-2 text-[11px] leading-relaxed">
-                    The final maturity value combines all valid deposits and calculated interest.
+                    Non-Profit amounts remain part of the deposited principal but do not earn Monthly RD profit.
                   </p>
 
                 </div>
@@ -615,7 +927,9 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
 
             ) : (
 
-              /* DAILY RD */
+              /* ============================================================
+                  DAILY RD
+              ============================================================ */
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
 
@@ -636,11 +950,11 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
                   </div>
 
                   <p className="text-gray-600 leading-relaxed font-mono text-[11px]">
-                    Daily RD Amount = Total Deposited ÷ 365
+                    Profit-Eligible Daily RD Amount = Profit-Eligible Amount ÷ 365
                   </p>
 
                   <p className="text-gray-500 mt-2 text-[11px] leading-relaxed">
-                    The deposited amount is normalized across the 365-day calculation period.
+                    Only the profit-eligible portion is used for Daily RD profit calculation. Late or excess payments are shown separately as Non-Profit Amount.
                   </p>
 
                 </div>
