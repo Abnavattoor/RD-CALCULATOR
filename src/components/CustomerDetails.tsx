@@ -61,11 +61,28 @@ export const CustomerDetails: React.FC<CustomerDetailsProps> = ({ data }) => {
                 RD Type
               </span>
               <span className="inline-flex items-center text-sm font-bold text-blue-700 bg-blue-50 border border-blue-200 px-2.5 py-0.5 rounded mt-1">
-                {data.rdType}
+                {data.rdType} {data.schemeCode ? `(${data.schemeCode})` : ''}
               </span>
+              {data.dailySchemeAmount > 0 && (
+                <span className="text-xs text-gray-500 block mt-1">
+                  Scheme installment: <strong className="text-gray-800">₹{data.dailySchemeAmount} / day</strong>
+                </span>
+              )}
+              {Boolean(data.schemeAmount && data.rdType === 'Monthly RD') && (
+                <span className="text-xs text-gray-500 block mt-1">
+                  Scheme installment: <strong className="text-gray-800">₹{data.schemeAmount} / month</strong>
+                </span>
+              )}
             </div>
           </div>
         </div>
+
+        {/* Warning banner if fields need verification */}
+        {data.missingFieldsWarning && (
+          <div className="mt-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center gap-2">
+            <span className="font-semibold">Note:</span> {data.missingFieldsWarning}
+          </div>
+        )}
 
         {/* Additional ledger details if available */}
         {(data.openingDate || data.maturityDate || data.status || data.period || data.interestRate) && (

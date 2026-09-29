@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 
 import { RDAccountData, RDParseError } from './types';
 
@@ -24,6 +24,8 @@ import { MaturityResult } from './components/MaturityResult';
 import { ErrorAlert } from './components/ErrorAlert';
 import { InterestRateSelection } from './components/InterestRateSelection';
 import { PreClosureCalculator } from './components/PreClosureCalculator';
+import { DailyRDInterestCalculator } from './components/DailyRDInterestCalculator';
+import { parseRDLedgerImage, RDDocumentProcessingError } from './utils/imageParser';
 
 import {
   Calculator,
@@ -36,11 +38,12 @@ import {
   Upload,
   BarChart3,
   Sparkles,
+  Coins,
 } from 'lucide-react';
 
 type RDSelection = 'Daily RD' | 'Monthly RD';
 
-type CalculationMode = 'Maturity' | 'Pre-Closure';
+type CalculationMode = 'Maturity' | 'Pre-Closure' | 'Daily-Interest';
 
 export default function App() {
   const [accountData, setAccountData] =
@@ -48,6 +51,11 @@ export default function App() {
 
   const [isLoading, setIsLoading] =
     useState<boolean>(false);
+
+  const [processingStatus, setProcessingStatus] =
+    useState<string>('');
+
+  const isProcessingRef = useRef<boolean>(false);
 
   const [error, setError] =
     useState<RDParseError | null>(null);
@@ -115,7 +123,13 @@ export default function App() {
   // ===========================================================================
 
   const handleFile = (file: File) => {
+    if (isProcessingRef.current) {
+      return;
+    }
+
+    isProcessingRef.current = true;
     setIsLoading(true);
+    setProcessingStatus('Reading RD document...');
     setError(null);
 
     const lowerName = file.name.toLowerCase();
@@ -127,17 +141,25 @@ export default function App() {
     const isPDF =
       lowerName.endsWith('.pdf');
 
+    const isImage =
+      lowerName.endsWith('.jpg') ||
+      lowerName.endsWith('.jpeg') ||
+      lowerName.endsWith('.png') ||
+      file.type.startsWith('image/');
+
     // -------------------------------------------------------------------------
     // Validate file
     // -------------------------------------------------------------------------
 
-    if ((!isExcel && !isPDF) || file.size === 0) {
+    if ((!isExcel && !isPDF && !isImage) || file.size === 0) {
       setIsLoading(false);
+      setProcessingStatus('');
+      isProcessingRef.current = false;
 
       setError({
         title: 'Invalid Ledger Format',
         message:
-          'Please upload a valid RD Personal Ledger file in Excel (.xlsx/.xls) or PDF (.pdf) format.',
+          'Please upload a valid RD Personal Ledger file in Excel (.xlsx/.xls), PDF (.pdf), or Image (.jpg/.png) format.',
       });
 
       setAccountData(null);
@@ -150,6 +172,8 @@ export default function App() {
 
     if (!selectedRDType) {
       setIsLoading(false);
+      setProcessingStatus('');
+      isProcessingRef.current = false;
 
       setError({
         title: 'Select RD Type',
@@ -289,8 +313,70 @@ export default function App() {
           return;
         }
 
+        // =====================================================================
+        // IMAGE (OCR via Server with Retry & Model Fallback)
+        // =====================================================================
+
+        if (isImage) {
+          const parsed = await parseRDLedgerImage(file, (status) => {
+            setProcessingStatus(status);
+          });
+
+          const parsedWithFileInfo: RDAccountData = {
+            ...parsed,
+            fileName: parsed.fileName || file.name,
+            fileSize: parsed.fileSize || file.size,
+          };
+
+          if (
+            parsedWithFileInfo.rdType === 'Daily RD' ||
+            parsedWithFileInfo.rdType === 'Monthly RD'
+          ) {
+            if (parsedWithFileInfo.rdType !== selectedRDType) {
+              throw new Error(
+                `You selected ${selectedRDType}, but the uploaded ledger appears to be ${parsedWithFileInfo.rdType}. Please select the correct RD type and upload the matching ledger.`
+              );
+            }
+          }
+
+          const calculatedData = recalculateRDWithRate(
+            parsedWithFileInfo,
+            12
+          );
+
+          setSelectedInterestRate(12);
+          setAccountData(calculatedData);
+          setError(null);
+
+          return;
+        }
+
       } catch (err: unknown) {
         setAccountData(null);
+
+        // ---------------------------------------------------------------------
+        // Structured RD Document Processing Error
+        // ---------------------------------------------------------------------
+        if (err instanceof RDDocumentProcessingError) {
+          let title = 'Unable to Process Document Image';
+          if (err.errorType === 'UNAVAILABLE') {
+            title = 'AI Service Busy';
+          } else if (err.errorType === 'RATE_LIMIT') {
+            title = 'Rate Limit Reached';
+          } else if (err.errorType === 'AUTH_ERROR') {
+            title = 'AI Service Configuration Error';
+          } else if (err.errorType === 'INVALID_IMAGE') {
+            title = 'Invalid Image';
+          } else if (err.errorType === 'UNRECOGNIZED_DOCUMENT') {
+            title = 'Unsupported Document';
+          }
+
+          setError({
+            title,
+            message: err.message,
+          });
+          return;
+        }
 
         // ---------------------------------------------------------------------
         // Existing Excel validation error
@@ -313,14 +399,18 @@ export default function App() {
           setError({
             title: isPDF
               ? 'Unable to Read PDF Ledger'
-              : 'Unable to Read Ledger',
+              : isImage
+                ? 'Unable to Process Document Image'
+                : 'Unable to Read Ledger',
 
             message:
               err.message ||
               (
                 isPDF
                   ? 'The PDF could not be read. Please make sure it is a valid text-based RD Personal Ledger PDF.'
-                  : 'Please upload a valid RD Personal Ledger Excel file.'
+                  : isImage
+                    ? 'The document image could not be processed. Please upload a clear photo or scan.'
+                    : 'Please upload a valid RD Personal Ledger Excel file.'
               ),
           });
 
@@ -334,15 +424,21 @@ export default function App() {
         setError({
           title: isPDF
             ? 'Unable to Read PDF Ledger'
-            : 'Unable to Read Ledger',
+            : isImage
+              ? 'Unable to Process Document Image'
+              : 'Unable to Read Ledger',
 
           message:
             isPDF
               ? 'The PDF could not be read. Please make sure it is a valid text-based RD Personal Ledger PDF. Scanned/image-only PDFs require OCR support.'
-              : 'Please upload a valid RD Personal Ledger Excel file.',
+              : isImage
+                ? 'The document image could not be processed. Please upload a clear photo or scan.'
+                : 'Please upload a valid RD Personal Ledger Excel file.',
         });
       } finally {
         setIsLoading(false);
+        setProcessingStatus('');
+        isProcessingRef.current = false;
       }
     };
 
@@ -352,6 +448,8 @@ export default function App() {
 
     reader.onerror = () => {
       setIsLoading(false);
+      setProcessingStatus('');
+      isProcessingRef.current = false;
 
       setError({
         title: 'Unable to Read Ledger',
@@ -372,8 +470,7 @@ export default function App() {
     if (isExcel) {
       reader.readAsArrayBuffer(file);
     } else {
-      // Trigger the same asynchronous flow for PDF.
-      // The parser itself receives the File object.
+      // Trigger the same asynchronous flow for PDF & Images.
       reader.onload({
         target: {
           result: file,
@@ -393,6 +490,8 @@ export default function App() {
     setSelectedInterestRate(12);
     setCalculationMode(null);
     setIsLoading(false);
+    setProcessingStatus('');
+    isProcessingRef.current = false;
   };
 
   // ===========================================================================
@@ -492,7 +591,7 @@ export default function App() {
 
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-5xl mx-auto">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-6xl mx-auto">
 
                 {/* MATURITY CALCULATOR */}
 
@@ -622,6 +721,70 @@ export default function App() {
 
                 </button>
 
+                {/* DAILY RD INTEREST CALCULATOR */}
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleCalculationModeSelection(
+                      'Daily-Interest'
+                    )
+                  }
+                  className="group relative text-left p-6 sm:p-8 rounded-2xl border-2 border-gray-200 bg-white shadow-sm transition-all duration-200 hover:border-indigo-400 hover:shadow-xl hover:-translate-y-1 focus:outline-none focus:ring-4 focus:ring-indigo-100"
+                >
+
+                  <div className="flex items-start gap-5">
+
+                    <div className="shrink-0 w-14 h-14 rounded-2xl flex items-center justify-center bg-indigo-50 text-indigo-600 group-hover:bg-indigo-600 group-hover:text-white transition-all duration-200">
+
+                      <Coins className="w-7 h-7" />
+
+                    </div>
+
+                    <div className="pr-4">
+
+                      <h3 className="text-xl font-bold text-gray-900">
+                        Daily RD Interest
+                      </h3>
+
+                      <p className="mt-2 text-sm leading-relaxed text-gray-500">
+                        Calculate total deposited and interest earned for daily recurring deposits by number of days.
+                      </p>
+
+                    </div>
+
+                  </div>
+
+                  <div className="mt-7 pt-5 border-t border-gray-100">
+
+                    <div className="flex items-center justify-between">
+
+                      <div>
+
+                        <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                          Calculation
+                        </p>
+
+                        <p className="mt-1 text-sm font-semibold text-gray-700">
+                          Deposit & Interest
+                        </p>
+
+                      </div>
+
+                      <div className="flex items-center gap-1 text-sm font-semibold text-indigo-600">
+
+                        Continue
+
+                        <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
+
+                      </div>
+
+                    </div>
+
+                  </div>
+
+                </button>
+
               </div>
 
             </div>
@@ -629,7 +792,7 @@ export default function App() {
 
           {/* RD TYPE SELECTION */}
 
-          {calculationMode && !selectedRDType && (
+          {calculationMode && calculationMode !== 'Daily-Interest' && !selectedRDType && (
             <div className="mt-10">
 
               <div className="text-center mb-6">
@@ -802,7 +965,7 @@ export default function App() {
 
           {/* UPLOAD */}
 
-          {calculationMode && selectedRDType && (
+          {calculationMode && calculationMode !== 'Daily-Interest' && selectedRDType && (
             <div className="mt-10 max-w-4xl mx-auto">
 
               <div className="text-center mb-3">
@@ -868,6 +1031,7 @@ export default function App() {
                 <UploadSection
                   onFileLoaded={handleFile}
                   isLoading={isLoading}
+                  statusMessage={processingStatus}
                 />
 
               </div>
@@ -963,15 +1127,75 @@ export default function App() {
           />
         )}
 
-        {/* INITIAL SCREEN */}
+        {/* CALCULATOR SWITCHER TABS WHEN IN ANY MODE */}
+        {calculationMode && (
+          <div className="w-full max-w-6xl mx-auto px-4 pt-6">
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-gray-200 p-1.5 sm:p-2 rounded-2xl shadow-xs">
+              <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleCalculationModeSelection('Maturity')}
+                  className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+                    calculationMode === 'Maturity'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+                  }`}
+                >
+                  <Calculator className="w-4 h-4" />
+                  Maturity Calculator
+                </button>
 
-        {!accountData && (
+                <button
+                  type="button"
+                  onClick={() => handleCalculationModeSelection('Pre-Closure')}
+                  className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+                    calculationMode === 'Pre-Closure'
+                      ? 'bg-amber-600 text-white shadow-xs'
+                      : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+                  }`}
+                >
+                  <CalendarDays className="w-4 h-4" />
+                  Pre-Closure Calculator
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleCalculationModeSelection('Daily-Interest')}
+                  className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all ${
+                    calculationMode === 'Daily-Interest'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+                  }`}
+                >
+                  <Coins className="w-4 h-4" />
+                  Daily RD Interest
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleReset}
+                className="text-xs font-semibold text-gray-500 hover:text-gray-900 px-3 py-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+              >
+                ← Back to Home
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* DAILY RD INTEREST CALCULATOR */}
+        {calculationMode === 'Daily-Interest' && (
+          <DailyRDInterestCalculator onBackToCalculators={handleReset} />
+        )}
+
+        {/* INITIAL SCREEN (when not Daily-Interest and no accountData) */}
+        {calculationMode !== 'Daily-Interest' && !accountData && (
           renderRDSelectionScreen()
         )}
 
         {/* RESULT */}
 
-        {accountData && (
+        {calculationMode !== 'Daily-Interest' && accountData && (
           <div>
 
             {calculationMode === 'Maturity' ? (

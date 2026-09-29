@@ -7,6 +7,8 @@ import {
   Upload,
   FileSpreadsheet,
   FileText,
+  ImageIcon,
+  Loader2,
 } from 'lucide-react';
 
 
@@ -17,6 +19,8 @@ interface UploadSectionProps {
   ) => void;
 
   isLoading: boolean;
+
+  statusMessage?: string;
 }
 
 
@@ -25,6 +29,7 @@ export const UploadSection: React.FC<
 > = ({
   onFileLoaded,
   isLoading,
+  statusMessage,
 }) => {
 
   const [
@@ -54,12 +59,15 @@ export const UploadSection: React.FC<
         fileName.endsWith('.xlsx') ||
         fileName.endsWith('.xls') ||
         fileName.endsWith('.pdf') ||
-        file.type ===
-          'application/pdf' ||
-        file.type ===
-          'application/vnd.ms-excel' ||
-        file.type ===
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        fileName.endsWith('.jpg') ||
+        fileName.endsWith('.jpeg') ||
+        fileName.endsWith('.png') ||
+        file.type === 'application/pdf' ||
+        file.type === 'application/vnd.ms-excel' ||
+        file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+        file.type === 'image/jpeg' ||
+        file.type === 'image/jpg' ||
+        file.type === 'image/png'
       );
     };
 
@@ -73,6 +81,10 @@ export const UploadSection: React.FC<
       file: File
     ) => {
 
+      if (isLoading) {
+        return;
+      }
+
       if (
         !isSupportedFile(
           file
@@ -80,7 +92,7 @@ export const UploadSection: React.FC<
       ) {
 
         alert(
-          'Please upload a valid RD Ledger file: Excel (.xlsx/.xls) or PDF (.pdf).'
+          'Please upload a valid RD Ledger file: Excel (.xlsx/.xls), PDF (.pdf), or Image (.jpg/.jpeg/.png).'
         );
 
         return;
@@ -101,6 +113,10 @@ export const UploadSection: React.FC<
     (
       e: React.ChangeEvent<HTMLInputElement>
     ) => {
+
+      if (isLoading) {
+        return;
+      }
 
       const files =
         e.target.files;
@@ -182,6 +198,9 @@ export const UploadSection: React.FC<
         false
       );
 
+      if (isLoading) {
+        return;
+      }
 
       const files =
         e.dataTransfer.files;
@@ -259,6 +278,12 @@ export const UploadSection: React.FC<
             .xlsx,
             .xls,
             .pdf,
+            .jpg,
+            .jpeg,
+            .png,
+            image/jpeg,
+            image/png,
+            image/jpg,
             application/pdf,
             application/vnd.ms-excel,
             application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
@@ -288,11 +313,13 @@ export const UploadSection: React.FC<
 
             ) : (
 
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1.5">
 
-                <FileSpreadsheet className="w-7 h-7" />
+                <FileSpreadsheet className="w-6 h-6" />
 
-                <FileText className="w-5 h-5" />
+                <FileText className="w-5 h-5 text-red-500" />
+
+                <ImageIcon className="w-5 h-5 text-indigo-500" />
 
               </div>
 
@@ -307,7 +334,7 @@ export const UploadSection: React.FC<
 
           <h2 className="text-xl sm:text-2xl font-bold text-gray-900 tracking-tight mb-2">
 
-            Upload RD Ledger
+            Upload RD Ledger or Document Image
 
           </h2>
 
@@ -319,7 +346,7 @@ export const UploadSection: React.FC<
           <p className="text-sm text-gray-500 max-w-md mb-5 leading-relaxed">
 
             Upload your approved Daily RD or Monthly RD Personal Ledger
-            in Excel or PDF format.
+            in Excel, PDF, or Document Photo/Scan (NITC Preclosure template supported).
 
           </p>
 
@@ -334,16 +361,7 @@ export const UploadSection: React.FC<
 
               <FileSpreadsheet className="w-3.5 h-3.5" />
 
-              XLSX
-
-            </span>
-
-
-            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-green-50 border border-green-100 text-xs font-semibold text-green-700">
-
-              <FileSpreadsheet className="w-3.5 h-3.5" />
-
-              XLS
+              XLSX / XLS
 
             </span>
 
@@ -356,6 +374,21 @@ export const UploadSection: React.FC<
 
             </span>
 
+
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-50 border border-indigo-100 text-xs font-semibold text-indigo-700">
+
+              <ImageIcon className="w-3.5 h-3.5" />
+
+              JPG / PNG
+
+            </span>
+
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-100 text-xs font-semibold text-amber-700">
+
+              NITC India Template
+
+            </span>
+
           </div>
 
 
@@ -363,7 +396,7 @@ export const UploadSection: React.FC<
           {/* BUTTON                                                        */}
           {/* ============================================================ */}
 
-          <div className="flex justify-center">
+          <div className="flex flex-col items-center justify-center gap-2">
 
             <button
               type="button"
@@ -374,22 +407,32 @@ export const UploadSection: React.FC<
               disabled={
                 isLoading
               }
-              className="inline-flex items-center gap-2 px-6 py-3 rounded-md bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm shadow-sm transition active:scale-[0.98] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              className="inline-flex items-center gap-2 px-6 py-3 rounded-md bg-blue-600 hover:bg-blue-700 text-white font-medium text-sm shadow-sm transition active:scale-[0.98] cursor-pointer disabled:opacity-75 disabled:cursor-not-allowed"
             >
 
-              <Upload className="w-4 h-4" />
+              {isLoading ? (
+                <Loader2 className="w-4 h-4 animate-spin text-white" />
+              ) : (
+                <Upload className="w-4 h-4" />
+              )}
 
               <span>
 
                 {
                   isLoading
-                    ? 'Processing Ledger...'
-                    : 'Choose Ledger File'
+                    ? statusMessage || 'Reading RD document...'
+                    : 'Choose Ledger or Document File'
                 }
 
               </span>
 
             </button>
+
+            {isLoading && statusMessage && (
+              <span className="text-xs font-semibold text-blue-600 animate-pulse">
+                {statusMessage}
+              </span>
+            )}
 
           </div>
 
@@ -400,13 +443,13 @@ export const UploadSection: React.FC<
 
           <p className="mt-4 text-xs text-gray-400">
 
-            Or drag and drop your ledger here
+            Or drag and drop your Excel, PDF or image file here
 
           </p>
 
 
           {/* ============================================================ */}
-          {/* PDF NOTE                                                      */}
+          {/* TEMPLATE & OCR NOTE                                           */}
           {/* ============================================================ */}
 
           <div className="mt-5 max-w-lg rounded-lg bg-gray-50 border border-gray-100 px-4 py-3">
@@ -414,12 +457,11 @@ export const UploadSection: React.FC<
             <p className="text-xs leading-relaxed text-gray-500">
 
               <strong className="text-gray-700">
-                PDF note:
+                Document & Image note:
               </strong>{' '}
 
-              Text-based PDF ledgers are supported.
-              Scanned or image-only PDFs may require OCR and cannot
-              be reliably calculated without readable text.
+              Directly import photos/scans of NITC INDIA LTD. Preclose / Premature templates.
+              Daily RD (RCD) and Monthly RD (RCM) scheme installments and payment tables are automatically detected.
 
             </p>
 

@@ -55,6 +55,16 @@ export interface RDAccountData {
 
   returnRate?: number;
   returnAmount?: number;
+
+  // NITC Preclose/Premature template metadata
+  isNitcTemplate?: boolean;
+  schemeCode?: string;
+  schemeAmount?: number;
+  branch?: string;
+  branchCode?: string;
+  preClosureCharges?: number;
+  netPayment?: number;
+  missingFieldsWarning?: string;
 }
 
 

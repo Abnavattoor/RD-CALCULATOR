@@ -469,6 +469,24 @@ function detectRDType(
 
 
   if (
+    /\brcd\b/i.test(
+      fullText
+    )
+  ) {
+    return 'Daily RD';
+  }
+
+
+  if (
+    /\brcm\b/i.test(
+      fullText
+    )
+  ) {
+    return 'Monthly RD';
+  }
+
+
+  if (
     /monthly\s*rd/.test(
       fullText
     )
@@ -1045,6 +1063,21 @@ export async function parseRDLedgerPDF(
       lines
     );
 
+  const schemeAmountText =
+    findLabelValue(
+      lines,
+      [
+        'scheme amount',
+        'scheme amt',
+        'daily installment',
+        'installment amount',
+        'monthly installment',
+      ]
+    );
+
+  const parsedHeaderSchemeAmount =
+    parseMoney(schemeAmountText);
+
 
   // ==========================================================================
   // TRANSACTIONS
@@ -1266,22 +1299,24 @@ export async function parseRDLedgerPDF(
     );
 
 
-  const dailySchemeAmount =
-    rdType === 'Daily RD' &&
-    validPayments.length > 0
-      ? roundMoney(
-          Math.min(
-            ...validPayments.map(
-              (
-                transaction
-              ) =>
-                Number(
-                  transaction.receiptCredit
-                )
-            )
+  let dailySchemeAmount = 0;
+
+  if (rdType === 'Daily RD') {
+    if (parsedHeaderSchemeAmount && parsedHeaderSchemeAmount > 0) {
+      dailySchemeAmount = roundMoney(parsedHeaderSchemeAmount);
+    } else if (/\brcd\b/i.test(fullText)) {
+      const rcdMatch = fullText.match(/\brcd[^\d]*(\d+(?:\.\d+)?)/i);
+      dailySchemeAmount = rcdMatch ? roundMoney(Number(rcdMatch[1])) : 100;
+    } else if (validPayments.length > 0) {
+      dailySchemeAmount = roundMoney(
+        Math.min(
+          ...validPayments.map(
+            (transaction) => Number(transaction.receiptCredit)
           )
         )
-      : 0;
+      );
+    }
+  }
 
 
   // ==========================================================================
