@@ -493,16 +493,17 @@ export function recalculateRDWithRate(
     }
 
     // -------------------------------------------------------------------------
-    // Progressive Monthly RD interest
-    // -------------------------------------------------------------------------
+    // ACTUAL PAYMENT HISTORY MATURITY CALCULATION
     //
-    // Only PROFIT-ELIGIBLE payments participate.
+    // Each installment earns interest according to the actual period
+    // for which that installment was invested:
     //
-    // Non-profit payments are completely excluded from
-    // the interest calculation.
+    //   paymentInterest =
+    //     paymentAmount * applicableAnnualRate * actualInvestmentDays / 365
+    //   where actualInvestmentDays = maturityDate - actualPaymentDate
     //
-    // The existing progressive monthly calculation
-    // is preserved for profitable installments.
+    // totalInterest = sum of interest from all actual payments
+    // maturityAmount = totalDeposited + totalInterest
     // -------------------------------------------------------------------------
 
     let accumulatedInterest = 0;
@@ -511,7 +512,7 @@ export function recalculateRDWithRate(
       (deposit, index) => {
 
         // ---------------------------------------------------------------
-        // Non-profit installment:
+        // Non-profit installment (e.g. after cutoff):
         // No Monthly RD interest.
         // ---------------------------------------------------------------
 
@@ -520,18 +521,39 @@ export function recalculateRDWithRate(
         }
 
         // ---------------------------------------------------------------
-        // Progressive tenure calculation.
+        // Actual investment days to maturity
         // ---------------------------------------------------------------
 
-        const monthsRemaining = Math.max(
-          1,
-          tenureMonths - index
-        );
+        let actualInvestmentDays = 0;
 
-        accumulatedInterest +=
-          deposit.amount *
-          monthlyRate *
-          monthsRemaining;
+        if (maturityDate && deposit.date) {
+          const diffMs =
+            maturityDate.getTime() - deposit.date.getTime();
+
+          actualInvestmentDays = Math.max(
+            0,
+            Math.round(diffMs / (1000 * 60 * 60 * 24))
+          );
+        } else {
+          // Fallback if actual payment date or maturity date is unavailable
+          const monthsRemaining = Math.max(
+            1,
+            tenureMonths - index
+          );
+
+          actualInvestmentDays = Math.max(
+            0,
+            Math.round((monthsRemaining / 12) * 365)
+          );
+        }
+
+        const paymentInterest =
+          (deposit.amount *
+            annualRate *
+            actualInvestmentDays) /
+          365;
+
+        accumulatedInterest += paymentInterest;
       }
     );
 

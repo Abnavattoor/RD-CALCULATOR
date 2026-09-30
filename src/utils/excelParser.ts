@@ -3099,28 +3099,66 @@ export function parseRDLedgerWorkbook(
         );
 
     /**
-     * Existing Monthly RD
-     * progressive calculation.
+     * ACTUAL PAYMENT HISTORY MATURITY CALCULATION
+     *
+     * Each installment earns interest according to the actual period
+     * for which that installment was invested:
+     *
+     *   paymentInterest =
+     *     paymentAmount * applicableAnnualRate * actualInvestmentDays / 365
+     *   where actualInvestmentDays = maturityDate - actualPaymentDate
+     *
+     * totalInterest = sum of interest from all actual payments
+     * maturityAmount = totalDeposited + totalInterest
      */
-    let accumulatedInterest =
-      0;
+    let parsedMaturityDate = parseDate(maturityDate);
+
+    if (!parsedMaturityDate) {
+      const parsedOpeningDate = parseDate(openingDate);
+      if (parsedOpeningDate) {
+        parsedMaturityDate = new Date(parsedOpeningDate);
+        parsedMaturityDate.setMonth(
+          parsedMaturityDate.getMonth() + tenureMonths
+        );
+      }
+    }
+
+    let accumulatedInterest = 0;
 
     monthlyDeposits.forEach(
       (
         deposit,
         index
       ) => {
-        const monthsRemaining =
-          Math.max(
+        let actualInvestmentDays = 0;
+
+        if (parsedMaturityDate && deposit.date) {
+          const diffMs =
+            parsedMaturityDate.getTime() - deposit.date.getTime();
+
+          actualInvestmentDays = Math.max(
+            0,
+            Math.round(diffMs / (1000 * 60 * 60 * 24))
+          );
+        } else {
+          const monthsRemaining = Math.max(
             1,
-            tenureMonths -
-              index
+            tenureMonths - index
           );
 
-        accumulatedInterest +=
-          deposit.amount *
-          monthlyRate *
-          monthsRemaining;
+          actualInvestmentDays = Math.max(
+            0,
+            Math.round((monthsRemaining / 12) * 365)
+          );
+        }
+
+        const paymentInterest =
+          (deposit.amount *
+            annualRate *
+            actualInvestmentDays) /
+          365;
+
+        accumulatedInterest += paymentInterest;
       }
     );
 
