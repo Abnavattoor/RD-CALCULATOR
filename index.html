@@ -9,6 +9,32 @@
     <meta property="og:description" content="Calculate Recurring Deposit maturity amount by uploading approved Daily RD or Monthly RD Personal Ledger Excel files." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Ignore Vite HMR WebSocket connection errors in AI Studio iframe environment
+      window.addEventListener('error', function (event) {
+        var msg = (event && event.message) || '';
+        var filename = (event && event.filename) || '';
+        if (
+          msg.indexOf('WebSocket') !== -1 ||
+          msg.indexOf('createWebSocketModuleRunnerTransport') !== -1 ||
+          filename.indexOf('@vite/client') !== -1
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      }, true);
+      window.addEventListener('unhandledrejection', function (event) {
+        var reason = event && event.reason;
+        var msg = (reason && reason.message) || String(reason || '');
+        if (
+          msg.indexOf('WebSocket') !== -1 ||
+          msg.indexOf('createWebSocketModuleRunnerTransport') !== -1
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      }, true);
+    </script>
   </head>
   <body>
     <div id="root"></div>

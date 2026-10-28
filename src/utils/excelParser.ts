@@ -965,39 +965,26 @@ function calculateDailyRD(
     calculationDays;
 
   /**
-   * Progressive Daily RD interest.
+   * Daily RD balance accumulation sequence (Company Excel methodology):
+   * Reference: CALCULATION OF RD - 2026 FEB 04 - 12%(2).xlsx, sheet DALIY
    */
-  let totalInterest = 0;
+  let B = normalizedDailyAmount;
+  let C = calculationDays > 0 ? (annualRate * 100) / calculationDays : 0;
+  let D = B;
 
-  for (
-    let day = 1;
-    day <= calculationDays;
-    day++
-  ) {
-    totalInterest +=
-      normalizedDailyAmount *
-      annualRate *
-      (day / calculationDays);
+  if (calculationDays === 1) {
+    D = B + C;
+  } else if (calculationDays >= 2) {
+    for (let d = 2; d <= calculationDays; d++) {
+      B = (d === 2) ? (normalizedDailyAmount + C) : D;
+      C = (B * annualRate) / 365;
+      D = B + C + normalizedDailyAmount;
+    }
   }
+  const finalBalance = D + nonProfitAmount;
 
-  totalInterest =
-    roundMoney(
-      totalInterest
-    );
-
-  /**
-   * The non-profit amount is still
-   * customer's principal.
-   *
-   * Therefore it remains inside
-   * maturity, but earns no Daily RD
-   * profit.
-   */
-  const maturityAmount =
-    roundMoney(
-      roundedTotal +
-        totalInterest
-    );
+  const totalInterest = roundMoney(finalBalance - roundedTotal);
+  const maturityAmount = roundMoney(finalBalance);
 
   return {
     dailySchemeAmount:
@@ -2140,6 +2127,32 @@ export function parseRDLedgerWorkbook(
           ]
         : null;
 
+    const numericDebit =
+      parseNumericAmount(
+        rawDebit
+      );
+
+    const hasPositiveDebit =
+      numericDebit !== null &&
+      !isNaN(numericDebit) &&
+      numericDebit > 0;
+
+    const numericIntPaid =
+      parseNumericAmount(
+        rawIntPaid
+      );
+
+    const partLower =
+      particulars.toLowerCase();
+
+    const isClosureRow =
+      hasPositiveDebit ||
+      partLower.includes('closure') ||
+      partLower.includes('maturity payout') ||
+      partLower.includes('a/c close') ||
+      partLower.includes('account close') ||
+      partLower.includes('settlement');
+
     const isSummaryText =
       isRowSummary(
         particulars,
@@ -2194,9 +2207,12 @@ export function parseRDLedgerWorkbook(
       isSummaryRow:
         isSummaryText,
 
+      isClosureRow,
+
       isValidPayment:
         hasPositiveReceipt &&
-        !isSummaryText,
+        !isSummaryText &&
+        !isClosureRow,
     });
 
     if (
@@ -3099,79 +3115,61 @@ export function parseRDLedgerWorkbook(
         );
 
     /**
-     * ACTUAL PAYMENT HISTORY MATURITY CALCULATION
+     * MONTHLY RD MATURITY CALCULATION (Company Excel Methodology)
      *
-     * Each installment earns interest according to the actual period
-     * for which that installment was invested:
-     *
-     *   paymentInterest =
-     *     paymentAmount * applicableAnnualRate * actualInvestmentDays / 365
-     *   where actualInvestmentDays = maturityDate - actualPaymentDate
-     *
-     * totalInterest = sum of interest from all actual payments
-     * maturityAmount = totalDeposited + totalInterest
+     * Reference Workbook: CALCULATION OF RD - 2026 FEB 04 - 12%.xlsx (MONTHLY sheet)
+     * Start with a zero balance.
+     * Allocates combined payments across due installment periods to prevent
+     * double-counting phantom installments at the end of the term.
      */
-    let parsedMaturityDate = parseDate(maturityDate);
+    let recordedInterestPaid: number | null = null;
+    let closureDate: string | undefined = undefined;
+    let closureAmount: number | undefined = undefined;
 
-    if (!parsedMaturityDate) {
-      const parsedOpeningDate = parseDate(openingDate);
-      if (parsedOpeningDate) {
-        parsedMaturityDate = new Date(parsedOpeningDate);
-        parsedMaturityDate.setMonth(
-          parsedMaturityDate.getMonth() + tenureMonths
-        );
+    for (const tx of rawTransactions) {
+      if (tx.intPaid !== null && tx.intPaid !== undefined && tx.intPaid !== '') {
+        const intVal = parseNumericAmount(tx.intPaid);
+        if (intVal !== null && intVal > 0) {
+          recordedInterestPaid = intVal;
+        }
+      }
+      if (tx.isClosureRow) {
+        if (tx.paymentDebit) {
+          const deb = parseNumericAmount(tx.paymentDebit);
+          if (deb) closureAmount = deb;
+        }
+        if (tx.date) closureDate = tx.date;
       }
     }
 
-    let accumulatedInterest = 0;
+    let balance = 0;
+    const numberOfMonths = Math.max(1, tenureMonths);
+    const expectedInstallment =
+      roundedTotalDeposited > 0
+        ? roundedTotalDeposited / numberOfMonths
+        : 2000;
 
-    monthlyDeposits.forEach(
-      (
-        deposit,
-        index
-      ) => {
-        let actualInvestmentDays = 0;
-
-        if (parsedMaturityDate && deposit.date) {
-          const diffMs =
-            parsedMaturityDate.getTime() - deposit.date.getTime();
-
-          actualInvestmentDays = Math.max(
-            0,
-            Math.round(diffMs / (1000 * 60 * 60 * 24))
-          );
-        } else {
-          const monthsRemaining = Math.max(
-            1,
-            tenureMonths - index
-          );
-
-          actualInvestmentDays = Math.max(
-            0,
-            Math.round((monthsRemaining / 12) * 365)
-          );
-        }
-
-        const paymentInterest =
-          (deposit.amount *
-            annualRate *
-            actualInvestmentDays) /
-          365;
-
-        accumulatedInterest += paymentInterest;
+    const installmentSlots = new Array(numberOfMonths).fill(0);
+    let curSlot = 0;
+    for (const dep of monthlyDeposits) {
+      const count = Math.max(
+        1,
+        Math.round(dep.amount / expectedInstallment)
+      );
+      for (let k = 0; k < count && curSlot < numberOfMonths; k++) {
+        installmentSlots[curSlot] = expectedInstallment;
+        curSlot++;
       }
-    );
+    }
 
-    const totalInterest =
-      roundMoney(
-        accumulatedInterest
-      );
+    for (let m = 0; m < numberOfMonths; m++) {
+      balance += installmentSlots[m];
+      const periodInterest = balance * monthlyRate;
+      balance += periodInterest;
+    }
 
-    const maturityAmount =
-      roundMoney(
-        roundedTotalDeposited +
-          totalInterest
-      );
+    const totalInterest = roundMoney(balance - roundedTotalDeposited);
+    const maturityAmount = roundMoney(balance);
 
     return {
       fileName,
@@ -3240,6 +3238,16 @@ export function parseRDLedgerWorkbook(
 
       returnAmount:
         totalInterest,
+
+      installmentsDue: numberOfMonths,
+
+      installmentsPaid: curSlot,
+
+      recordedInterestPaid,
+
+      closureDate,
+
+      closureAmount,
     };
   }
 

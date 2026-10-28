@@ -139,14 +139,20 @@ export const RDCharts: React.FC<RDChartsProps> = ({ data }) => {
     );
 
     for (const day of uniquePoints) {
-      let accumulatedInterest = 0;
+      let B = normalizedDailyAmount;
+      let C = tenureDays > 0 ? (annualRate * 100) / tenureDays : 0;
+      let D = B;
 
-      for (let currentDay = 1; currentDay <= day; currentDay++) {
-        accumulatedInterest +=
-          normalizedDailyAmount *
-          annualRate *
-          (currentDay / 365);
+      if (day === 1) {
+        D = B + C;
+      } else if (day >= 2) {
+        for (let currentDay = 2; currentDay <= day; currentDay++) {
+          B = (currentDay === 2) ? (normalizedDailyAmount + C) : D;
+          C = (B * annualRate) / 365;
+          D = B + C + normalizedDailyAmount;
+        }
       }
+      const accumulatedInterest = D - day * normalizedDailyAmount;
 
       progressiveData.push({
         period: `Day ${day}`,

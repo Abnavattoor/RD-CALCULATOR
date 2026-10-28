@@ -302,3 +302,129 @@ export function createNitcMonthlyRCMAccountData(): RDAccountData {
     branch: 'MAIN BRANCH',
   };
 }
+
+/**
+ * Creates Account Data matching the authoritative real test case:
+ * DepositPersonalLedgerRD.xlsx
+ * - Opening Date: 14/10/2024
+ * - Duration: 12 Months
+ * - Maturity Date: 14/10/2025
+ * - Annual Interest Rate: 12%
+ * - Total Deposits: ₹24,000.00
+ * - Combined payment: ₹6,000 representing three installments (missed & combined payment)
+ * - Recorded interest paid in ledger: ₹1,134.00
+ * - Maturity/closure transaction dated 14/10/2025
+ */
+export function createDepositPersonalLedgerRDAccountData(): RDAccountData {
+  const paymentRows = [
+    { rowNum: 1, date: '14/10/2024', credit: 2000, debit: null, intPaid: null, particulars: 'Installment #1 (Oct 2024)' },
+    { rowNum: 2, date: '14/11/2024', credit: 2000, debit: null, intPaid: null, particulars: 'Installment #2 (Nov 2024)' },
+    { rowNum: 3, date: '14/12/2024', credit: 2000, debit: null, intPaid: null, particulars: 'Installment #3 (Dec 2024)' },
+    { rowNum: 4, date: '14/03/2025', credit: 6000, debit: null, intPaid: null, particulars: 'Combined Deposit for 3 Installments (#4, #5, #6)' },
+    { rowNum: 5, date: '14/04/2025', credit: 2000, debit: null, intPaid: null, particulars: 'Installment #7 (Apr 2025)' },
+    { rowNum: 6, date: '14/05/2025', credit: 2000, debit: null, intPaid: null, particulars: 'Installment #8 (May 2025)' },
+    { rowNum: 7, date: '14/06/2025', credit: 2000, debit: null, intPaid: null, particulars: 'Installment #9 (Jun 2025)' },
+    { rowNum: 8, date: '14/07/2025', credit: 2000, debit: null, intPaid: null, particulars: 'Installment #10 (Jul 2025)' },
+    { rowNum: 9, date: '14/08/2025', credit: 2000, debit: null, intPaid: null, particulars: 'Installment #11 (Aug 2025)' },
+    { rowNum: 10, date: '14/09/2025', credit: 2000, debit: null, intPaid: null, particulars: 'Installment #12 (Sep 2025)' },
+    { rowNum: 11, date: '14/10/2025', credit: null, debit: 25134, intPaid: 1134, particulars: 'A/c Closed - Maturity Settlement', isClosure: true },
+  ];
+
+  let runningBalance = 0;
+  const transactions = paymentRows.map((p) => {
+    if (p.credit) {
+      runningBalance += p.credit;
+    } else if (p.debit) {
+      runningBalance = 0;
+    }
+    const dateObj = parseDateFlexible(p.date);
+    return {
+      rowNum: p.rowNum,
+      date: p.date,
+      depositDateObj: dateObj,
+      particulars: p.particulars,
+      paymentDebit: p.debit,
+      receiptCredit: p.credit,
+      rawReceiptCredit: p.credit,
+      balance: runningBalance,
+      intPaid: p.intPaid,
+      isSummaryRow: false,
+      isClosureRow: Boolean(p.isClosure),
+      isValidPayment: Boolean(p.credit && p.credit > 0 && !p.isClosure),
+    };
+  });
+
+  return {
+    fileName: 'DepositPersonalLedgerRD.xlsx',
+    fileSize: 45000,
+    sheetName: 'DepositPersonalLedgerRD',
+    customerName: 'Santhosh Kumar',
+    accountNumber: 'RD-2024-1014',
+    rdType: 'Monthly RD',
+    openingDate: '14/10/2024',
+    maturityDate: '14/10/2025',
+    interestRate: '12%',
+    annualRate: 0.12,
+    selectedInterestRate: 12,
+    status: 'Closed',
+    period: '12 Months',
+    tenureDays: 365,
+    transactions,
+    totalDeposited: 24000,
+    dailySchemeAmount: 0,
+    profitEligibleAmount: 24000,
+    nonProfitAmount: 0,
+    normalizedDailyAmount: 0,
+    totalInterest: 1618.66,
+    maturityAmount: 25618.66,
+    validTransactionCount: 10,
+    hasSummaryRow: true,
+    returnRate: 12,
+    returnAmount: 1618.66,
+    recordedInterestPaid: 1134,
+    closureDate: '14/10/2025',
+    closureAmount: 25134,
+    installmentsDue: 12,
+    installmentsPaid: 12,
+  };
+}
+
+/**
+ * Creates an actual XLSX File for DepositPersonalLedgerRD.xlsx
+ */
+export function createDepositPersonalLedgerRDFile(): File {
+  const wsData = [
+    ['PERSONAL LEDGER (RD)', '', '', '', '', ''],
+    ['Customer Name:', 'Santhosh Kumar', '', 'A/c No:', 'RD-2024-1014', ''],
+    ['A/c Opening Date:', '14/10/2024', '', 'Period:', '12 Months', ''],
+    ['Interest Rate:', '12%', '', 'Status:', 'Closed', ''],
+    ['', '', '', '', '', ''],
+    ['Date', 'Particulars', 'Payment/Debit', 'Receipt/Credit', 'Balance', 'Int Paid'],
+    ['14/10/2024', 'By Cash Deposit - Month 1', '', 2000, 2000, ''],
+    ['14/11/2024', 'By Cash Deposit - Month 2', '', 2000, 4000, ''],
+    ['14/12/2024', 'By Cash Deposit - Month 3', '', 2000, 6000, ''],
+    ['14/03/2025', 'By Cash Deposit - Combined 3 Installments', '', 6000, 12000, ''],
+    ['14/04/2025', 'By Cash Deposit - Month 7', '', 2000, 14000, ''],
+    ['14/05/2025', 'By Cash Deposit - Month 8', '', 2000, 16000, ''],
+    ['14/06/2025', 'By Cash Deposit - Month 9', '', 2000, 18000, ''],
+    ['14/07/2025', 'By Cash Deposit - Month 10', '', 2000, 20000, ''],
+    ['14/08/2025', 'By Cash Deposit - Month 11', '', 2000, 22000, ''],
+    ['14/09/2025', 'By Cash Deposit - Month 12', '', 2000, 24000, ''],
+    ['14/10/2025', 'A/c Closed - Maturity Settlement', 25134, '', 0, 1134],
+    ['', 'Total / Closing Balance', 25134, 24000, 0, 1134],
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'DepositPersonalLedgerRD');
+
+  const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob([excelBuffer], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+
+  return new File([blob], 'DepositPersonalLedgerRD.xlsx', {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    lastModified: Date.now(),
+  });
+}

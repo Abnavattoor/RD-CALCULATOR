@@ -1,3 +1,6 @@
+// Ensure HMR is disabled in AI Studio container environment to prevent WebSocket transport errors
+process.env.DISABLE_HMR = 'true';
+
 import express, { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
@@ -517,6 +520,7 @@ async function startServer() {
         middlewareMode: true,
         host: '0.0.0.0',
         port: PORT,
+        hmr: false,
       },
       appType: 'spa',
     });

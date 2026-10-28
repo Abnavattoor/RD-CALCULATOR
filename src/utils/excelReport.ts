@@ -26,7 +26,7 @@ export const generateExcelReport = (data: RDAccountData) => {
 
   const interestRate =
     typeof accountData.annualRate === 'number'
-      ? `${(accountData.annualRate * 100).toFixed(2)}%`
+      ? `${(accountData.annualRate * 100).toFixed(2)}% per annum`
       : 'Not Specified';
 
   const totalDeposited =

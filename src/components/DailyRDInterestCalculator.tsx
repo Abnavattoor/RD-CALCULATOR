@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Calculator,
   CalendarDays,
@@ -18,113 +18,226 @@ import {
   CheckCircle2,
   AlertCircle,
   FileSpreadsheet,
-  ArrowRight,
+  Minus,
+  Plus,
   Sparkles,
 } from 'lucide-react';
 import {
-  calculateDailyRDInterest,
+  calculateDailyRDMaturity,
+  calculateMonthlyRDMaturity,
   getDailyRDBreakdownPage,
-  generateDailyRDBreakdownCSV,
+  getMonthlyRDBreakdown,
+  generateRDCSVReport,
   formatCurrency,
-  roundMoney,
-  DailyRDInterestResult,
-} from '../utils/dailyRDInterestCalculator';
+  adjustRate,
+  validateRateInput,
+  getDefaultRateForDuration,
+  DAILY_RD_SUPPORTED_DURATIONS,
+  MONTHLY_RD_SUPPORTED_DURATIONS,
+  RATE_ADJUSTMENT_STEP,
+  CONFIGURABLE_MAX_INTEREST_RATE,
+  CONFIGURABLE_MIN_INTEREST_RATE,
+  RDSchemeType,
+  RDCalculationResult,
+} from '../utils/rdInterestCalculator';
 
 interface DailyRDInterestCalculatorProps {
   onBackToCalculators?: () => void;
 }
 
-const PRESET_DAYS = [
-  { label: '30 Days (1 mo)', value: 30 },
-  { label: '90 Days (3 mos)', value: 90 },
-  { label: '180 Days (6 mos)', value: 180 },
-  { label: '365 Days (1 yr)', value: 365 },
-  { label: '730 Days (2 yrs)', value: 730 },
-];
-
-const PRESET_AMOUNTS = [50, 100, 200, 500, 1000];
-const PRESET_RATES = [8, 10, 12, 14, 15, 18];
-
 export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps> = ({
   onBackToCalculators,
 }) => {
-  // Input states
-  const [daysInput, setDaysInput] = useState<string>('365');
-  const [dailyAmountInput, setDailyAmountInput] = useState<string>('100');
-  const [interestRateInput, setInterestRateInput] = useState<number>(12);
-  const [customRateText, setCustomRateText] = useState<string>('');
+  // Scheme Selection: Daily RD vs Monthly RD
+  const [schemeType, setSchemeType] = useState<RDSchemeType>('Daily RD');
 
-  // UI states
+  // Daily RD state (Default reference case: 365 days, 54.767/day, 12% p.a.)
+  const [dailyDays, setDailyDays] = useState<number>(365);
+  const [dailyAmountInput, setDailyAmountInput] = useState<string>('54.767');
+  const [dailyRate, setDailyRate] = useState<number>(12.0);
+  const [dailyRateInput, setDailyRateInput] = useState<string>('12.0');
+
+  // Monthly RD state
+  const [monthlyMonths, setMonthlyMonths] = useState<number>(12);
+  const [monthlyAmountInput, setMonthlyAmountInput] = useState<string>('2000');
+  const [monthlyRate, setMonthlyRate] = useState<number>(12.0);
+  const [monthlyRateInput, setMonthlyRateInput] = useState<string>('12.0');
+
+  // UI Breakdown states
   const [showBreakdown, setShowBreakdown] = useState<boolean>(false);
   const [breakdownPage, setBreakdownPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(25);
 
-  // Live calculation
-  const parsedDays = Number(daysInput);
-  const parsedDailyAmount = Number(dailyAmountInput);
-  const parsedRate = customRateText !== '' ? Number(customRateText) : interestRateInput;
+  const isDaily = schemeType === 'Daily RD';
 
-  const result: DailyRDInterestResult = useMemo(() => {
-    return calculateDailyRDInterest(parsedDays, parsedDailyAmount, parsedRate);
-  }, [parsedDays, parsedDailyAmount, parsedRate]);
+  // Duration options for current scheme
+  const durationOptions = isDaily
+    ? DAILY_RD_SUPPORTED_DURATIONS
+    : MONTHLY_RD_SUPPORTED_DURATIONS;
 
-  // Breakdown pagination result
-  const breakdownData = useMemo(() => {
-    if (!result.isValid || !showBreakdown) {
-      return null;
+  // Current active duration value
+  const currentDuration = isDaily ? dailyDays : monthlyMonths;
+
+  // Associated default rate for the selected duration
+  const defaultRateForCurrentDuration = useMemo(() => {
+    return getDefaultRateForDuration(schemeType, currentDuration);
+  }, [schemeType, currentDuration]);
+
+  // Active rate & rate setter
+  const activeRate = isDaily ? dailyRate : monthlyRate;
+  const activeRateInput = isDaily ? dailyRateInput : monthlyRateInput;
+
+  // Active installment input
+  const activeInstallmentInput = isDaily ? dailyAmountInput : monthlyAmountInput;
+  const parsedInstallment = Number(activeInstallmentInput);
+
+  // Live calculation using dedicated module
+  const result: RDCalculationResult = useMemo(() => {
+    if (isDaily) {
+      return calculateDailyRDMaturity(dailyDays, parsedInstallment, dailyRate);
+    } else {
+      return calculateMonthlyRDMaturity(monthlyMonths, parsedInstallment, monthlyRate);
     }
-    return getDailyRDBreakdownPage(
-      result.days,
-      result.dailyAmount,
-      result.annualInterestRate,
-      breakdownPage,
-      pageSize
-    );
-  }, [result, showBreakdown, breakdownPage, pageSize]);
+  }, [isDaily, dailyDays, monthlyMonths, parsedInstallment, dailyRate, monthlyRate]);
 
-  // Handle Preset Day click
-  const handlePresetDays = (val: number) => {
-    setDaysInput(String(val));
+  // Synchronize rate input display when active rate changes
+  useEffect(() => {
+    if (isDaily) {
+      setDailyRateInput(dailyRate.toString());
+    } else {
+      setMonthlyRateInput(monthlyRate.toString());
+    }
+  }, [isDaily, dailyRate, monthlyRate]);
+
+  // Handle changing duration:
+  // "Do not automatically change the rate to 12.5% or 13% when the duration changes."
+  // "Keep 12% as the default for all supported Monthly RD durations unless the user changes it."
+  const handleDurationChange = (val: number) => {
+    if (isDaily) {
+      const newDefaultRate = getDefaultRateForDuration(schemeType, val);
+      setDailyDays(val);
+      setDailyRate(newDefaultRate);
+      setDailyRateInput(newDefaultRate.toString());
+    } else {
+      setMonthlyMonths(val);
+      // For Monthly RD, retain the user's rate or the 12.0% default; do not auto-switch to 12.5% or 13%
+    }
     setBreakdownPage(1);
   };
 
-  // Handle Preset Amount click
-  const handlePresetAmount = (val: number) => {
-    setDailyAmountInput(String(val));
+  // Handle changing scheme:
+  const handleSchemeChange = (newScheme: RDSchemeType) => {
+    setSchemeType(newScheme);
     setBreakdownPage(1);
   };
 
-  // Handle Preset Rate click
-  const handlePresetRate = (rate: number) => {
-    setInterestRateInput(rate);
-    setCustomRateText('');
-    setBreakdownPage(1);
+  // Interest rate adjustments: +0.1 pp
+  const handleIncreaseRate = () => {
+    const nextRate = adjustRate(activeRate, RATE_ADJUSTMENT_STEP);
+    if (isDaily) {
+      setDailyRate(nextRate);
+      setDailyRateInput(nextRate.toString());
+    } else {
+      setMonthlyRate(nextRate);
+      setMonthlyRateInput(nextRate.toString());
+    }
   };
 
-  // Handle Custom Rate change
-  const handleCustomRateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Interest rate adjustments: -0.1 pp
+  const handleDecreaseRate = () => {
+    const nextRate = adjustRate(activeRate, -RATE_ADJUSTMENT_STEP);
+    if (isDaily) {
+      setDailyRate(nextRate);
+      setDailyRateInput(nextRate.toString());
+    } else {
+      setMonthlyRate(nextRate);
+      setMonthlyRateInput(nextRate.toString());
+    }
+  };
+
+  // Direct numeric input for rate
+  const handleRateInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
-    setCustomRateText(val);
-    setBreakdownPage(1);
+    if (isDaily) {
+      setDailyRateInput(val);
+    } else {
+      setMonthlyRateInput(val);
+    }
+
+    if (val.trim() === '') return;
+    const validated = validateRateInput(val);
+    if (validated.isValid) {
+      if (isDaily) {
+        setDailyRate(validated.value);
+      } else {
+        setMonthlyRate(validated.value);
+      }
+    }
   };
 
-  // Reset function
-  const handleReset = () => {
-    setDaysInput('365');
-    setDailyAmountInput('100');
-    setInterestRateInput(12);
-    setCustomRateText('');
+  // Reset interest rate:
+  // "Reset must restore the correct default rate for the selected duration."
+  // "Keep the installment amount and duration unchanged when the rate is adjusted."
+  const handleResetRate = () => {
+    const defaultR = defaultRateForCurrentDuration;
+    if (isDaily) {
+      setDailyRate(defaultR);
+      setDailyRateInput(defaultR.toString());
+    } else {
+      setMonthlyRate(defaultR);
+      setMonthlyRateInput(defaultR.toString());
+    }
+  };
+
+  // Reset entire calculator to defaults
+  const handleFullReset = () => {
+    if (isDaily) {
+      setDailyDays(365);
+      setDailyAmountInput('54.767');
+      setDailyRate(12.0);
+      setDailyRateInput('12.0');
+    } else {
+      setMonthlyMonths(12);
+      setMonthlyAmountInput('2000');
+      setMonthlyRate(12.0);
+      setMonthlyRateInput('12.0');
+    }
     setShowBreakdown(false);
     setBreakdownPage(1);
   };
 
-  // CSV Download handler
+  // Paginated breakdown data
+  const breakdownData = useMemo(() => {
+    if (!result.isValid || !showBreakdown) return null;
+
+    if (isDaily) {
+      return getDailyRDBreakdownPage(
+        dailyDays,
+        parsedInstallment,
+        dailyRate,
+        breakdownPage,
+        pageSize
+      );
+    } else {
+      const allRows = getMonthlyRDBreakdown(monthlyMonths, parsedInstallment, monthlyRate);
+      return {
+        rows: allRows,
+        totalRows: allRows.length,
+        currentPage: 1,
+        totalPages: 1,
+        pageSize: allRows.length,
+      };
+    }
+  }, [isDaily, dailyDays, monthlyMonths, parsedInstallment, dailyRate, monthlyRate, showBreakdown, breakdownPage, pageSize, result.isValid]);
+
+  // CSV download
   const handleDownloadCSV = () => {
     if (!result.isValid) return;
-    const csvContent = generateDailyRDBreakdownCSV(
-      result.days,
-      result.dailyAmount,
-      result.annualInterestRate
+    const csvContent = generateRDCSVReport(
+      schemeType,
+      currentDuration,
+      parsedInstallment,
+      activeRate
     );
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -132,7 +245,7 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
     link.href = url;
     link.setAttribute(
       'download',
-      `Daily_RD_Breakdown_${result.days}days_${result.dailyAmount}rs_${result.annualInterestRate}pct.csv`
+      `${schemeType.replace(/\s+/g, '_')}_${currentDuration}${isDaily ? 'days' : 'months'}_rate${activeRate}pct.csv`
     );
     document.body.appendChild(link);
     link.click();
@@ -140,7 +253,7 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
     URL.revokeObjectURL(url);
   };
 
-  const isPresetRate = customRateText === '' && PRESET_RATES.includes(interestRateInput);
+  const isRateAtDefault = Math.abs(activeRate - defaultRateForCurrentDuration) < 0.001;
 
   return (
     <div className="w-full max-w-6xl mx-auto px-4 py-8 sm:py-10">
@@ -152,10 +265,10 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
           </div>
           <div>
             <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-indigo-50 border border-indigo-100 text-[11px] font-bold text-indigo-700 uppercase tracking-wider mb-1">
-              Recurring Daily Calculator
+              Recurring Deposit Calculator
             </div>
             <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-gray-900">
-              Daily RD Interest Calculator
+              RD Interest & Maturity Calculator
             </h2>
           </div>
         </div>
@@ -165,7 +278,7 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
             <button
               type="button"
               onClick={onBackToCalculators}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl border border-gray-200 bg-white text-xs sm:text-sm font-semibold text-gray-600 hover:text-gray-900 hover:border-gray-300 hover:bg-gray-50 shadow-xs transition-all"
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl border border-gray-200 bg-white text-xs sm:text-sm font-semibold text-gray-600 hover:text-gray-900 hover:border-gray-300 hover:bg-gray-50 shadow-xs transition-all cursor-pointer"
             >
               ← Back to Calculators
             </button>
@@ -173,79 +286,184 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
 
           <button
             type="button"
-            onClick={handleReset}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-gray-200 bg-white text-xs sm:text-sm font-semibold text-gray-600 hover:text-gray-900 hover:border-gray-300 hover:bg-gray-50 shadow-xs transition-all"
-            title="Reset to default values (365 days, ₹100, 12%)"
+            onClick={handleFullReset}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-gray-200 bg-white text-xs sm:text-sm font-semibold text-gray-600 hover:text-gray-900 hover:border-gray-300 hover:bg-gray-50 shadow-xs transition-all cursor-pointer"
+            title="Reset calculator to initial state"
           >
             <RotateCcw className="w-4 h-4 text-gray-400" />
-            Reset
+            Reset All
           </button>
         </div>
+      </div>
+
+      {/* SCHEME TOGGLE: DAILY RD vs MONTHLY RD */}
+      <div className="mb-6 p-1.5 bg-gray-100/90 rounded-2xl max-w-md mx-auto flex items-center shadow-inner">
+        <button
+          type="button"
+          onClick={() => handleSchemeChange('Daily RD')}
+          className={`flex-1 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+            isDaily
+              ? 'bg-white text-indigo-900 shadow-sm'
+              : 'text-gray-600 hover:text-gray-900 hover:bg-white/50'
+          }`}
+          aria-pressed={isDaily}
+        >
+          <CalendarDays className="w-4 h-4 text-blue-600" />
+          Daily RD (DALIY)
+        </button>
+
+        <button
+          type="button"
+          onClick={() => handleSchemeChange('Monthly RD')}
+          className={`flex-1 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+            !isDaily
+              ? 'bg-white text-emerald-900 shadow-sm'
+              : 'text-gray-600 hover:text-gray-900 hover:bg-white/50'
+          }`}
+          aria-pressed={!isDaily}
+        >
+          <Coins className="w-4 h-4 text-emerald-600" />
+          Monthly RD (MONTHLY)
+        </button>
       </div>
 
       {/* DESCRIPTION */}
       <div className="rounded-2xl bg-gradient-to-r from-blue-50/70 via-indigo-50/40 to-slate-50 border border-blue-100/80 p-4 sm:p-5 mb-8">
         <p className="text-sm text-gray-700 leading-relaxed">
-          Calculate the accumulated deposit and recurring simple interest for a daily recurring deposit.
-          Unlike a fixed deposit where the total sum is deposited upfront, interest here is earned by each daily installment based on its exact remaining days invested.
+          {isDaily ? (
+            <>
+              <strong>Daily Recurring Deposit:</strong> Calculate the accumulated deposit and daily interest
+              for <strong>365</strong>, <strong>730</strong>, or <strong>1,095</strong> days. Follows the intended daily balance accumulation
+              and daily interest sequence with interactive rate adjustment controls.
+            </>
+          ) : (
+            <>
+              <strong>Monthly Recurring Deposit:</strong> Calculate the accumulated monthly installments and interest
+              for <strong>12</strong>, <strong>24</strong>, or <strong>36</strong> months. Follows monthly balance accumulation
+              with precise rate adjustment controls.
+            </>
+          )}
         </p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        {/* LEFT COLUMN: INPUTS */}
+        {/* LEFT COLUMN: INPUTS & CONTROLS */}
         <div className="lg:col-span-6 space-y-6">
           <div className="bg-white rounded-2xl border border-gray-200 shadow-xs p-5 sm:p-7">
             <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-5 flex items-center gap-2">
               <Calculator className="w-5 h-5 text-indigo-600" />
-              Deposit Parameters
+              {schemeType} Parameters
             </h3>
 
-            {/* INPUT 1: NUMBER OF DAYS */}
+            {/* PARAMETER 1: SUPPORTED DURATION SELECTION */}
+            <div className="space-y-2 mb-6">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                  <CalendarDays className="w-4 h-4 text-blue-600" />
+                  Duration / Term
+                </label>
+                <span className="text-xs font-semibold text-gray-500">
+                  {isDaily ? 'Days' : 'Months'}
+                </span>
+              </div>
+
+              {/* Supported Duration Buttons */}
+              <div className="grid grid-cols-3 gap-2">
+                {durationOptions.map((opt) => {
+                  const isSelected = currentDuration === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => handleDurationChange(opt.value)}
+                      className={`p-3 rounded-xl border text-center transition-all cursor-pointer ${
+                        isSelected
+                          ? 'border-indigo-600 bg-indigo-50/80 text-indigo-900 font-bold shadow-xs ring-2 ring-indigo-100'
+                          : 'border-gray-200 bg-gray-50 hover:bg-white text-gray-700 hover:border-gray-300'
+                      }`}
+                      aria-pressed={isSelected}
+                    >
+                      <div className="text-sm sm:text-base font-extrabold">{opt.value} {isDaily ? 'Days' : 'Mos'}</div>
+                      <div className="text-[11px] text-gray-500">{opt.years} {opt.years === 1 ? 'Year' : 'Years'}</div>
+                      <div className="mt-1 text-[10px] font-bold text-indigo-700 bg-white/80 py-0.5 rounded border border-indigo-100">
+                        Default: {opt.defaultRate}%
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* PARAMETER 2: INSTALLMENT AMOUNT */}
             <div className="space-y-2 mb-6">
               <div className="flex items-center justify-between">
                 <label
-                  htmlFor="number-of-days"
+                  htmlFor="installment-amount"
                   className="text-sm font-bold text-gray-900 flex items-center gap-2"
                 >
-                  <CalendarDays className="w-4 h-4 text-blue-600" />
-                  Number of Days
+                  <IndianRupee className="w-4 h-4 text-emerald-600" />
+                  {isDaily ? 'Daily Installment Amount' : 'Monthly Installment Amount'}
                 </label>
                 <span className="text-xs font-semibold text-gray-500">
-                  e.g. 365
+                  {isDaily ? 'per day' : 'per month'}
                 </span>
               </div>
 
               <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-base font-bold text-gray-500">
+                  ₹
+                </span>
                 <input
-                  id="number-of-days"
+                  id="installment-amount"
                   type="number"
-                  min="1"
-                  step="1"
-                  value={daysInput}
+                  min="0.01"
+                  step="any"
+                  value={activeInstallmentInput}
                   onChange={(e) => {
-                    setDaysInput(e.target.value);
+                    if (isDaily) {
+                      setDailyAmountInput(e.target.value);
+                    } else {
+                      setMonthlyAmountInput(e.target.value);
+                    }
                     setBreakdownPage(1);
                   }}
-                  placeholder="365"
-                  className="w-full h-12 rounded-xl border border-gray-300 bg-white px-4 pr-16 text-base font-bold text-gray-900 outline-none transition focus:border-indigo-600 focus:ring-4 focus:ring-indigo-50"
+                  placeholder={isDaily ? '54.767' : '1000'}
+                  className="w-full h-12 rounded-xl border border-gray-300 bg-white pl-9 pr-4 text-base font-bold text-gray-900 outline-none transition focus:border-indigo-600 focus:ring-4 focus:ring-indigo-50"
                 />
-                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-400">
-                  DAYS
-                </span>
               </div>
 
-              {/* Day presets */}
+              {/* Installment Presets */}
               <div className="flex flex-wrap gap-1.5 pt-1">
-                {PRESET_DAYS.map((preset) => {
-                  const isActive = Number(daysInput) === preset.value;
+                {(isDaily
+                  ? [
+                      { label: '₹54.77 (Ref)', val: '54.767' },
+                      { label: '₹55', val: '55' },
+                      { label: '₹100', val: '100' },
+                      { label: '₹200', val: '200' },
+                      { label: '₹500', val: '500' },
+                      { label: '₹1,000', val: '1000' },
+                    ]
+                  : [
+                      { label: '₹500', val: '500' },
+                      { label: '₹1,000', val: '1000' },
+                      { label: '₹2,000', val: '2000' },
+                      { label: '₹3,000', val: '3000' },
+                      { label: '₹5,000', val: '5000' },
+                    ]
+                ).map((preset) => {
+                  const isActive = activeInstallmentInput === preset.val || Number(activeInstallmentInput) === Number(preset.val);
                   return (
                     <button
-                      key={preset.value}
+                      key={preset.val}
                       type="button"
-                      onClick={() => handlePresetDays(preset.value)}
-                      className={`text-xs px-2.5 py-1 rounded-lg border font-medium transition-all ${
+                      onClick={() => {
+                        if (isDaily) setDailyAmountInput(preset.val);
+                        else setMonthlyAmountInput(preset.val);
+                        setBreakdownPage(1);
+                      }}
+                      className={`text-xs px-2.5 py-1 rounded-lg border font-medium transition-all cursor-pointer ${
                         isActive
-                          ? 'border-indigo-600 bg-indigo-50 text-indigo-700 font-bold'
+                          ? 'border-emerald-600 bg-emerald-50 text-emerald-800 font-bold'
                           : 'border-gray-200 bg-gray-50 text-gray-600 hover:border-gray-300 hover:bg-white'
                       }`}
                     >
@@ -256,147 +474,94 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
               </div>
             </div>
 
-            {/* INPUT 2: DAILY AMOUNT */}
-            <div className="space-y-2 mb-6">
-              <div className="flex items-center justify-between">
-                <label
-                  htmlFor="daily-amount"
-                  className="text-sm font-bold text-gray-900 flex items-center gap-2"
-                >
-                  <IndianRupee className="w-4 h-4 text-emerald-600" />
-                  Daily Amount
-                </label>
-                <span className="text-xs font-semibold text-gray-500">
-                  per day
-                </span>
-              </div>
-
-              <div className="relative">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-base font-bold text-gray-500">
-                  ₹
-                </span>
-                <input
-                  id="daily-amount"
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={dailyAmountInput}
-                  onChange={(e) => {
-                    setDailyAmountInput(e.target.value);
-                    setBreakdownPage(1);
-                  }}
-                  placeholder="100"
-                  className="w-full h-12 rounded-xl border border-gray-300 bg-white pl-9 pr-4 text-base font-bold text-gray-900 outline-none transition focus:border-indigo-600 focus:ring-4 focus:ring-indigo-50"
-                />
-              </div>
-
-              {/* Amount presets */}
-              <div className="flex flex-wrap gap-1.5 pt-1">
-                {PRESET_AMOUNTS.map((amt) => {
-                  const isActive = Number(dailyAmountInput) === amt;
-                  return (
-                    <button
-                      key={amt}
-                      type="button"
-                      onClick={() => handlePresetAmount(amt)}
-                      className={`text-xs px-3 py-1 rounded-lg border font-medium transition-all ${
-                        isActive
-                          ? 'border-emerald-600 bg-emerald-50 text-emerald-800 font-bold'
-                          : 'border-gray-200 bg-gray-50 text-gray-600 hover:border-gray-300 hover:bg-white'
-                      }`}
-                    >
-                      ₹{amt}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* INPUT 3: ANNUAL INTEREST RATE */}
-            <div className="space-y-2 mb-6">
+            {/* PARAMETER 3: INTERACTIVE INTEREST-RATE CONTROLS (REQUIREMENT 2) */}
+            <div className="space-y-3 mb-6 p-4 rounded-xl bg-amber-50/40 border border-amber-200">
               <div className="flex items-center justify-between">
                 <label className="text-sm font-bold text-gray-900 flex items-center gap-2">
                   <Percent className="w-4 h-4 text-amber-600" />
-                  Annual Interest Rate (%)
+                  Annual Interest Rate
                 </label>
-                <span className="text-xs font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                  {parsedRate > 0 ? `${parsedRate.toFixed(2)}%` : '0%'}
-                </span>
-              </div>
 
-              {/* Preset rates */}
-              <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
-                {PRESET_RATES.map((rate) => {
-                  const isSelected = isPresetRate && interestRateInput === rate;
-                  return (
-                    <button
-                      key={rate}
-                      type="button"
-                      onClick={() => handlePresetRate(rate)}
-                      className={`h-10 rounded-xl border text-sm font-bold transition-all ${
-                        isSelected
-                          ? 'border-amber-500 bg-amber-50 text-amber-800 shadow-xs'
-                          : 'border-gray-200 bg-white text-gray-700 hover:border-amber-300 hover:bg-amber-50/40'
-                      }`}
-                    >
-                      {rate}%
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Custom rate */}
-              <div className="pt-2">
-                <div className="relative">
-                  <input
-                    type="number"
-                    min="0"
-                    max="100"
-                    step="0.01"
-                    value={customRateText}
-                    onChange={handleCustomRateChange}
-                    placeholder="Enter custom rate (e.g. 11.5)"
-                    className={`w-full h-11 rounded-xl border bg-white px-4 pr-10 text-sm font-semibold outline-none transition ${
-                      customRateText !== ''
-                        ? 'border-amber-500 text-gray-900 ring-2 ring-amber-50'
-                        : 'border-gray-300 text-gray-700 focus:border-amber-500'
-                    }`}
-                  />
-                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm font-bold text-gray-400">
-                    %
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-black text-amber-900 bg-amber-100/80 px-2.5 py-0.5 rounded-lg border border-amber-200">
+                    {activeRate.toFixed(2)}% per annum {!isDaily && `(${(activeRate / 12).toFixed(2)}% / mo)`}
                   </span>
                 </div>
               </div>
-            </div>
 
-            {/* ACTION / CALCULATE BUTTON */}
-            <div className="pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  // Re-evaluates state, triggers breakdown scroll or open
-                  if (result.isValid) {
-                    // Smoothly focus or notify user
-                  }
-                }}
-                disabled={!result.isValid}
-                className={`w-full h-12 rounded-xl font-bold text-sm sm:text-base flex items-center justify-center gap-2 shadow-sm transition-all duration-200 ${
-                  result.isValid
-                    ? 'bg-indigo-600 hover:bg-indigo-700 active:scale-[0.99] text-white shadow-indigo-100 cursor-pointer'
-                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                }`}
-              >
-                <Calculator className="w-5 h-5" />
-                Calculate
-              </button>
-              <p className="text-center text-xs text-gray-400 mt-2">
-                Calculations update live as you type or pick presets
-              </p>
+              {/* Stepper buttons & Numeric Input with 0.1 pp step, with Reset button beside */}
+              <div className="flex items-center gap-2 pt-1">
+                {/* Minus (−) Button */}
+                <button
+                  type="button"
+                  onClick={handleDecreaseRate}
+                  disabled={activeRate <= CONFIGURABLE_MIN_INTEREST_RATE}
+                  className="w-11 h-11 rounded-xl border-2 border-amber-300 bg-white hover:border-amber-500 hover:bg-amber-50 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center text-amber-900 font-bold transition shadow-xs cursor-pointer"
+                  title="Decrease rate by 0.1% per annum"
+                  aria-label="Decrease interest rate by 0.1 percentage points"
+                >
+                  <Minus className="w-4 h-4" />
+                </button>
+
+                {/* Editable Numeric Interest-Rate Input */}
+                <div className="relative flex-1">
+                  <input
+                    type="number"
+                    min={CONFIGURABLE_MIN_INTEREST_RATE}
+                    max={CONFIGURABLE_MAX_INTEREST_RATE}
+                    step={RATE_ADJUSTMENT_STEP}
+                    value={activeRateInput}
+                    onChange={handleRateInputChange}
+                    aria-label="Enter specific annual interest rate"
+                    className="w-full h-11 rounded-xl border-2 border-amber-400 bg-white pl-3.5 pr-14 text-base font-black font-mono text-gray-900 outline-none transition focus:border-amber-600 focus:ring-4 focus:ring-amber-100"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-extrabold text-amber-800">
+                    % p.a.
+                  </span>
+                </div>
+
+                {/* Plus (+) Button */}
+                <button
+                  type="button"
+                  onClick={handleIncreaseRate}
+                  disabled={activeRate >= CONFIGURABLE_MAX_INTEREST_RATE}
+                  className="w-11 h-11 rounded-xl border-2 border-amber-300 bg-white hover:border-amber-500 hover:bg-amber-50 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center text-amber-900 font-bold transition shadow-xs cursor-pointer"
+                  title="Increase rate by 0.1% per annum"
+                  aria-label="Increase interest rate by 0.1 percentage points"
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+
+                {/* Reset Button */}
+                <button
+                  type="button"
+                  onClick={handleResetRate}
+                  disabled={isRateAtDefault}
+                  title={`Reset to default rate (${isDaily ? defaultRateForCurrentDuration : 12.0}% p.a.)`}
+                  className={`h-11 px-3 sm:px-3.5 rounded-xl border-2 font-bold text-xs flex items-center gap-1.5 transition shadow-xs cursor-pointer ${
+                    isRateAtDefault
+                      ? 'border-gray-200 text-gray-400 bg-gray-50 cursor-not-allowed'
+                      : 'border-amber-300 bg-white text-amber-800 hover:bg-amber-100 hover:border-amber-400 active:scale-95'
+                  }`}
+                  aria-label="Reset interest rate to default"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Reset</span>
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-gray-500 pt-0.5">
+                <span>Adjustment step: <strong>±0.1%</strong></span>
+                {!isDaily && (
+                  <span className="text-emerald-700 font-bold">Monthly rate: <strong>{(activeRate / 12).toFixed(4)}%</strong></span>
+                )}
+                <span>Default: <strong>{isDaily ? `${defaultRateForCurrentDuration}%` : '12.0%'}</strong></span>
+              </div>
             </div>
 
             {/* Error Message if invalid */}
             {!result.isValid && result.errorMessage && (
-              <div className="mt-4 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-medium flex items-center gap-2">
+              <div className="mt-4 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-semibold flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
                 <span>{result.errorMessage}</span>
               </div>
@@ -416,36 +581,36 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
                   Calculation Result
                 </h3>
               </div>
-              <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                {result.days} Days • {result.annualInterestRate}% p.a.
+              <span className="text-xs font-bold px-3 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
+                {result.duration} {isDaily ? 'Days' : 'Months'} • {result.annualInterestRate}% p.a.
               </span>
             </div>
 
             {/* MAIN STATS GRID */}
             <div className="grid grid-cols-2 gap-3.5 mb-5">
-              {/* Total Days */}
+              {/* Duration */}
               <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
                 <span className="text-xs font-semibold text-gray-500 block mb-1">
-                  Total Days
+                  Selected Duration
                 </span>
                 <span className="text-xl sm:text-2xl font-black text-gray-900 tracking-tight">
-                  {result.days.toLocaleString('en-IN')}
+                  {result.duration} {isDaily ? 'Days' : 'Months'}
                 </span>
                 <span className="text-[11px] text-gray-400 block mt-0.5">
-                  {(result.days / 365).toFixed(2)} years
+                  {isDaily ? `${(result.duration / 365).toFixed(2)} years` : `${(result.duration / 12).toFixed(1)} years`}
                 </span>
               </div>
 
-              {/* Daily Amount */}
+              {/* Installment Amount */}
               <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
                 <span className="text-xs font-semibold text-gray-500 block mb-1">
-                  Daily Amount
+                  Installment Amount
                 </span>
                 <span className="text-xl sm:text-2xl font-black text-gray-900 tracking-tight">
-                  {formatCurrency(result.dailyAmount)}
+                  {formatCurrency(result.installmentAmount)}
                 </span>
                 <span className="text-[11px] text-gray-400 block mt-0.5">
-                  per day installment
+                  {isDaily ? 'per day' : 'per month'}
                 </span>
               </div>
             </div>
@@ -459,7 +624,7 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
                     Total Deposited
                   </span>
                   <span className="text-xs text-blue-600">
-                    {result.days} installments × {formatCurrency(result.dailyAmount)}
+                    {result.duration} installments × {formatCurrency(result.installmentAmount)}
                   </span>
                 </div>
                 <span className="text-xl sm:text-2xl font-black text-blue-900">
@@ -472,10 +637,10 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
                 <div>
                   <span className="text-xs font-bold uppercase tracking-wider text-amber-900 block flex items-center gap-1.5">
                     <TrendingUp className="w-3.5 h-3.5 text-amber-700" />
-                    Interest Earned
+                    Total Interest Earned
                   </span>
                   <span className="text-xs text-amber-700">
-                    Recurring duration calculation ({result.annualInterestRate}%)
+                    Accumulated at {result.annualInterestRate}% per annum
                   </span>
                 </div>
                 <span className="text-xl sm:text-2xl font-black text-amber-900">
@@ -483,17 +648,17 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
                 </span>
               </div>
 
-              {/* Total Amount / Maturity Value */}
+              {/* Final Maturity Value */}
               <div className="flex items-center justify-between p-5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-700 text-white shadow-md shadow-emerald-100">
                 <div>
                   <span className="text-xs font-bold uppercase tracking-wider text-emerald-100 block">
-                    Total Amount (Maturity Value)
+                    Final Maturity Amount
                   </span>
                   <span className="text-xs text-emerald-200">
-                    Total Deposited + Interest
+                    Total Deposited + Total Interest
                   </span>
                 </div>
-                <span className="text-2xl sm:text-3xl font-black tracking-tight">
+                <span className="text-2xl sm:text-3xl font-black tracking-tight font-mono">
                   {formatCurrency(result.maturityAmount)}
                 </span>
               </div>
@@ -540,27 +705,29 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
           <div className="rounded-2xl bg-gray-50 border border-gray-200/80 p-4 sm:p-5 text-xs text-gray-600 leading-relaxed">
             <h4 className="font-bold text-gray-800 mb-1 flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-              How Interest is Calculated
+              Formula & Reconciliation
             </h4>
             <p className="text-gray-600 mb-2">
-              For every daily deposit, interest is computed for the specific days it remains invested:
+              {isDaily
+                ? 'Daily RD balances accumulate daily, with interest earned on each day’s progressive balance:'
+                : 'Monthly RD balances accumulate monthly, with interest earned on each month’s progressive balance:'}
             </p>
             <div className="font-mono bg-white p-2.5 rounded-lg border border-gray-200 text-[11px] text-gray-700 space-y-1">
-              <div>Day 1: ₹{result.dailyAmount} × {result.annualInterestRate}% × ({result.days} - 1) / 365</div>
-              <div>Day 2: ₹{result.dailyAmount} × {result.annualInterestRate}% × ({result.days} - 2) / 365</div>
-              <div className="text-gray-400">...</div>
-              <div>Day {result.days}: ₹{result.dailyAmount} × {result.annualInterestRate}% × 0 / 365 = ₹0.00</div>
+              <div>{result.formulaDescription}</div>
+              <div className="text-emerald-700 font-semibold pt-1">
+                Reconciliation: {formatCurrency(result.totalDeposited)} + {formatCurrency(result.totalInterest)} = {formatCurrency(result.maturityAmount)}
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* OPTIONAL BREAKDOWN SECTION */}
+      {/* BREAKDOWN SECTION */}
       <div className="mt-10 bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
         <button
           type="button"
           onClick={() => setShowBreakdown((prev) => !prev)}
-          className="w-full px-6 py-4.5 flex items-center justify-between bg-white hover:bg-gray-50/70 transition-colors text-left"
+          className="w-full px-6 py-4.5 flex items-center justify-between bg-white hover:bg-gray-50/70 transition-colors text-left cursor-pointer"
         >
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center font-bold">
@@ -568,10 +735,12 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
             </div>
             <div>
               <h3 className="text-base font-bold text-gray-900">
-                View Interest Breakdown
+                View Interest Schedule Breakdown
               </h3>
               <p className="text-xs text-gray-500">
-                Detailed day-by-day table of installments, investment durations, and earned interest
+                {isDaily
+                  ? 'Day-by-day table of installments, progressive balances, and daily interest'
+                  : 'Month-by-month table of installments, progressive balances, and monthly interest'}
               </p>
             </div>
           </div>
@@ -604,33 +773,33 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
                     breakdownData.totalRows
                   )}
                 </strong>{' '}
-                of <strong className="text-gray-800">{breakdownData.totalRows}</strong> days
+                of <strong className="text-gray-800">{breakdownData.totalRows}</strong> {isDaily ? 'days' : 'months'}
               </div>
 
               <div className="flex items-center gap-2">
-                {/* Page Size Selector */}
-                <div className="flex items-center gap-1.5 text-xs text-gray-600">
-                  <span>Rows:</span>
-                  <select
-                    value={pageSize}
-                    onChange={(e) => {
-                      setPageSize(Number(e.target.value));
-                      setBreakdownPage(1);
-                    }}
-                    className="border border-gray-300 rounded-lg bg-white px-2 py-1 text-xs font-semibold outline-none focus:border-indigo-600"
-                  >
-                    <option value={10}>10</option>
-                    <option value={25}>25</option>
-                    <option value={50}>50</option>
-                    <option value={100}>100</option>
-                  </select>
-                </div>
+                {isDaily && (
+                  <div className="flex items-center gap-1.5 text-xs text-gray-600">
+                    <span>Rows:</span>
+                    <select
+                      value={pageSize}
+                      onChange={(e) => {
+                        setPageSize(Number(e.target.value));
+                        setBreakdownPage(1);
+                      }}
+                      className="border border-gray-300 rounded-lg bg-white px-2 py-1 text-xs font-semibold outline-none focus:border-indigo-600"
+                    >
+                      <option value={10}>10</option>
+                      <option value={25}>25</option>
+                      <option value={50}>50</option>
+                      <option value={100}>100</option>
+                    </select>
+                  </div>
+                )}
 
-                {/* CSV Download Button */}
                 <button
                   type="button"
                   onClick={handleDownloadCSV}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 hover:text-indigo-600 hover:border-indigo-200 shadow-2xs transition-all"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 hover:text-indigo-600 hover:border-indigo-200 shadow-2xs transition-all cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Download CSV
@@ -643,9 +812,9 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
               <table className="w-full text-left text-xs sm:text-sm">
                 <thead>
                   <tr className="bg-gray-50 border-b border-gray-200 text-gray-600 font-bold">
-                    <th className="py-3 px-4">Day</th>
-                    <th className="py-3 px-4">Deposit</th>
-                    <th className="py-3 px-4">Remaining Days</th>
+                    <th className="py-3 px-4">{isDaily ? 'Day' : 'Month'}</th>
+                    <th className="py-3 px-4">Installment</th>
+                    <th className="py-3 px-4">Cumulative Balance</th>
                     <th className="py-3 px-4 text-right">Interest</th>
                     <th className="py-3 px-4 text-right">Cumulative Deposit</th>
                     <th className="py-3 px-4 text-right">Cumulative Total</th>
@@ -654,26 +823,26 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
                 <tbody className="divide-y divide-gray-100">
                   {breakdownData.rows.map((row) => (
                     <tr
-                      key={row.day}
+                      key={row.periodIndex}
                       className="hover:bg-indigo-50/30 transition-colors font-mono text-xs"
                     >
                       <td className="py-2.5 px-4 font-bold text-gray-900">
-                        Day {row.day}
+                        {row.label}
                       </td>
                       <td className="py-2.5 px-4 font-semibold text-gray-700">
                         {formatCurrency(row.deposit)}
                       </td>
-                      <td className="py-2.5 px-4 text-gray-500">
-                        {row.remainingDays} days
+                      <td className="py-2.5 px-4 text-gray-600">
+                        {formatCurrency(row.balance)}
                       </td>
                       <td className="py-2.5 px-4 text-right font-bold text-amber-700">
-                        {formatCurrency(row.interest)}
+                        {formatCurrency(row.periodInterest)}
                       </td>
                       <td className="py-2.5 px-4 text-right text-gray-600">
                         {formatCurrency(row.cumulativeDeposit)}
                       </td>
                       <td className="py-2.5 px-4 text-right font-bold text-emerald-800">
-                        {formatCurrency(row.cumulativeDeposit + row.cumulativeInterest)}
+                        {formatCurrency(row.cumulativeTotal)}
                       </td>
                     </tr>
                   ))}
@@ -681,8 +850,8 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
               </table>
             </div>
 
-            {/* PAGINATION CONTROLS */}
-            {breakdownData.totalPages > 1 && (
+            {/* PAGINATION CONTROLS (FOR DAILY RD) */}
+            {isDaily && breakdownData.totalPages > 1 && (
               <div className="mt-4 flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
                 <span className="text-xs text-gray-500 font-medium">
                   Page {breakdownData.currentPage} of {breakdownData.totalPages}
@@ -693,7 +862,7 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
                     type="button"
                     onClick={() => setBreakdownPage(1)}
                     disabled={breakdownData.currentPage <= 1}
-                    className="px-2.5 py-1 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50"
+                    className="px-2.5 py-1 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 cursor-pointer"
                   >
                     First
                   </button>
@@ -701,7 +870,7 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
                     type="button"
                     onClick={() => setBreakdownPage((p) => Math.max(1, p - 1))}
                     disabled={breakdownData.currentPage <= 1}
-                    className="px-3 py-1 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50"
+                    className="px-3 py-1 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 cursor-pointer"
                   >
                     Prev
                   </button>
@@ -716,7 +885,7 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
                       setBreakdownPage((p) => Math.min(breakdownData.totalPages, p + 1))
                     }
                     disabled={breakdownData.currentPage >= breakdownData.totalPages}
-                    className="px-3 py-1 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50"
+                    className="px-3 py-1 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 cursor-pointer"
                   >
                     Next
                   </button>
@@ -724,7 +893,7 @@ export const DailyRDInterestCalculator: React.FC<DailyRDInterestCalculatorProps>
                     type="button"
                     onClick={() => setBreakdownPage(breakdownData.totalPages)}
                     disabled={breakdownData.currentPage >= breakdownData.totalPages}
-                    className="px-2.5 py-1 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50"
+                    className="px-2.5 py-1 rounded-lg border border-gray-200 bg-white text-xs font-semibold text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 cursor-pointer"
                   >
                     Last
                   </button>

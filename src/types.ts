@@ -20,6 +20,55 @@ export interface LedgerTransactionRow {
 
   isSummaryRow: boolean;
   isValidPayment: boolean;
+  isClosureRow?: boolean;
+  isOverTenure?: boolean;
+  installmentAllocationCount?: number;
+}
+
+export interface MonthlyRDInstallmentPeriod {
+  installmentNumber: number;
+  monthIndex: number; // 1 to N
+  dueDate: string;
+  expectedAmount: number;
+  allocatedAmount: number;
+  paymentDate?: string;
+  status: 'on-time' | 'overdue' | 'missed' | 'advance';
+  openingBalance: number;
+  periodInterest: number;
+  closingBalance: number;
+}
+
+export interface MonthlyRDCalculationLog {
+  tenureMonths: number;
+  monthlyInstallment: number;
+  annualRate: number;
+  monthlyRate: number;
+  totalDeposited: number;
+  profitEligiblePrincipal: number;
+  nonProfitPrincipal: number;
+  installmentsDue: number;
+  installmentsPaid: number;
+  combinedPaymentsDetected: number;
+  periods: MonthlyRDInstallmentPeriod[];
+  rawFinalBalance: number;
+  calculatedMaturityAmount: number;
+  calculatedTotalInterest: number;
+  recordedInterestInLedger?: number | null;
+  interestVariance?: number;
+  closureDate?: string;
+  closureAmount?: number;
+  diagnosticNotes: string[];
+}
+
+export interface MaturityRolloverDetails {
+  originalPrincipal: number;
+  originalInterest: number;
+  originalMaturityAmount: number;
+  subsequentTenureMonths: number;
+  monthlyCalculationBase: number; // originalMaturityAmount / subsequentTenureMonths
+  annualInterestRate: number;
+  subsequentTotalInterest: number;
+  subsequentMaturityAmount: number;
 }
 
 export interface RDAccountData {
@@ -55,6 +104,20 @@ export interface RDAccountData {
 
   returnRate?: number;
   returnAmount?: number;
+
+  // Monthly RD Actual Ledger analysis and tracking
+  installmentsDue?: number;
+  installmentsPaid?: number;
+  onTimeInstallmentsCount?: number;
+  overdueInstallmentsCount?: number;
+  missedInstallmentsCount?: number;
+  overTenureDepositsCount?: number;
+  recordedInterestPaid?: number | null;
+  closureDate?: string;
+  closureAmount?: number;
+  installmentSchedule?: MonthlyRDInstallmentPeriod[];
+  intermediateCalculationLog?: MonthlyRDCalculationLog;
+  rolloverCalculation?: MaturityRolloverDetails;
 
   // NITC Preclose/Premature template metadata
   isNitcTemplate?: boolean;

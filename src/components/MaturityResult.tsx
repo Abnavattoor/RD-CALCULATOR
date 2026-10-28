@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { RDAccountData } from '../types';
 import { RDCharts } from './RDCharts';
 import { formatCurrency } from '../utils/excelParser';
 import { generateRDReport } from '../utils/pdfReport';
 import { generateExcelReport } from '../utils/excelReport';
+import { calculateMaturityRollover } from '../utils/rdCalculator';
 
 import {
   RotateCcw,
@@ -17,6 +18,12 @@ import {
   BarChart3,
   FileDown,
   FileSpreadsheet,
+  ChevronDown,
+  ChevronUp,
+  Layers,
+  ArrowRightLeft,
+  Clock,
+  AlertCircle,
 } from 'lucide-react';
 
 interface MaturityResultProps {
@@ -28,6 +35,9 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
   data,
   onReset,
 }) => {
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [showRollover, setShowRollover] = useState(false);
+  const [rolloverMonths, setRolloverMonths] = useState<number>(12);
   // ========================================================================
   // RD TYPE
   // ========================================================================
@@ -495,12 +505,12 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
 
               <div className="text-2xl font-bold font-mono text-amber-950">
 
-                {ratePercent}%
+                {ratePercent}% p.a.
 
               </div>
 
               <p className="text-xs text-amber-700 mt-2">
-                Annual interest rate
+                % per annum
               </p>
 
             </div>
@@ -752,6 +762,353 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
           </div>
 
         </div>
+
+        {/* ==================================================================
+            LEDGER RECONCILIATION & CLOSURE CARD (If recorded interest exists)
+        ================================================================== */}
+
+        {data.recordedInterestPaid !== null &&
+          data.recordedInterestPaid !== undefined && (
+            <div className="px-6 sm:px-8 pt-7">
+              <div className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-5">
+                <div className="flex items-center justify-between pb-3 mb-3 border-b border-indigo-100">
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-indigo-600" />
+                    <h3 className="text-sm font-bold text-indigo-950">
+                      Ledger Closure & Interest Reconciliation
+                    </h3>
+                  </div>
+                  {data.closureDate && (
+                    <span className="text-xs font-semibold px-2.5 py-1 rounded bg-indigo-100 text-indigo-800">
+                      Closure: {data.closureDate}
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+                  <div className="bg-white p-3 rounded-lg border border-indigo-100">
+                    <span className="text-gray-500 block">
+                      Recorded Interest in Ledger
+                    </span>
+                    <span className="text-base font-bold font-mono text-gray-900 mt-1 block">
+                      {formatCurrency(data.recordedInterestPaid)}
+                    </span>
+                  </div>
+
+                  <div className="bg-white p-3 rounded-lg border border-indigo-100">
+                    <span className="text-gray-500 block">
+                      Calculated Scheme Interest
+                    </span>
+                    <span className="text-base font-bold font-mono text-emerald-700 mt-1 block">
+                      {formatCurrency(data.totalInterest)}
+                    </span>
+                  </div>
+
+                  <div className="bg-white p-3 rounded-lg border border-indigo-100">
+                    <span className="text-gray-500 block">
+                      Reconciled Difference
+                    </span>
+                    <span className="text-base font-bold font-mono text-indigo-700 mt-1 block">
+                      {formatCurrency(
+                        Math.abs(data.totalInterest - data.recordedInterestPaid)
+                      )}
+                    </span>
+                  </div>
+                </div>
+
+                <p className="text-xs text-indigo-800 mt-3 leading-relaxed">
+                  The uploaded ledger has a recorded closure entry with{' '}
+                  <strong>{formatCurrency(data.recordedInterestPaid)}</strong>{' '}
+                  interest paid. The company's full-tenure compounding model on
+                  the ₹{data.totalDeposited.toLocaleString('en-IN')} deposited
+                  principal produces{' '}
+                  <strong>{formatCurrency(data.maturityAmount)}</strong>{' '}
+                  (interest: {formatCurrency(data.totalInterest)}).
+                </p>
+              </div>
+            </div>
+          )}
+
+        {/* ==================================================================
+            INSTALLMENT TRACKING & INTERMEDIATE COMPOUNDING SCHEDULE
+        ================================================================== */}
+
+        {isMonthly && (
+          <div className="px-6 sm:px-8 pt-7">
+            <div className="rounded-xl border border-gray-200 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setShowSchedule(!showSchedule)}
+                className="w-full px-5 py-4 bg-gray-50 hover:bg-gray-100/80 transition flex items-center justify-between cursor-pointer border-b border-gray-200 text-left"
+              >
+                <div className="flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-blue-600" />
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900">
+                      Installment Tracking & Compounding Schedule
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {data.installmentsDue ?? 12} Due •{' '}
+                      {data.installmentsPaid ?? data.validTransactionCount} Paid •{' '}
+                      {data.overdueInstallmentsCount ?? 0} Combined/Overdue
+                      Allocated
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1 text-xs font-semibold text-blue-600">
+                  <span>{showSchedule ? 'Hide Schedule' : 'Show Schedule'}</span>
+                  {showSchedule ? (
+                    <ChevronUp className="w-4 h-4" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4" />
+                  )}
+                </div>
+              </button>
+
+              {showSchedule && (
+                <div className="p-5 space-y-4">
+                  {/* Diagnostic notes */}
+                  {data.intermediateCalculationLog?.diagnosticNotes &&
+                    data.intermediateCalculationLog.diagnosticNotes.length > 0 && (
+                      <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-900 space-y-1">
+                        <span className="font-bold block">
+                          Installment Allocation Diagnostic:
+                        </span>
+                        {data.intermediateCalculationLog.diagnosticNotes.map(
+                          (note, idx) => (
+                            <p key={idx}>• {note}</p>
+                          )
+                        )}
+                      </div>
+                    )}
+
+                  {/* Monthly Compounding Table */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left border-collapse">
+                      <thead>
+                        <tr className="bg-gray-100 text-gray-700 uppercase font-semibold text-[10px] tracking-wider border-b border-gray-200">
+                          <th className="py-2.5 px-3">Month</th>
+                          <th className="py-2.5 px-3">Due Date</th>
+                          <th className="py-2.5 px-3">Deposit</th>
+                          <th className="py-2.5 px-3">Status</th>
+                          <th className="py-2.5 px-3">Payment Date</th>
+                          <th className="py-2.5 px-3 text-right">
+                            Opening Balance
+                          </th>
+                          <th className="py-2.5 px-3 text-right">
+                            Period Interest ({((data.annualRate * 100) / 12).toFixed(2)}%)
+                          </th>
+                          <th className="py-2.5 px-3 text-right font-bold">
+                            Closing Balance
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 font-mono">
+                        {(data.installmentSchedule || []).map((period) => (
+                          <tr
+                            key={period.monthIndex}
+                            className="hover:bg-gray-50/70"
+                          >
+                            <td className="py-2 px-3 font-semibold text-gray-800">
+                              Month {period.monthIndex}
+                            </td>
+                            <td className="py-2 px-3 text-gray-500">
+                              {period.dueDate || '-'}
+                            </td>
+                            <td className="py-2 px-3 font-bold text-gray-900">
+                              {formatCurrency(period.allocatedAmount)}
+                            </td>
+                            <td className="py-2 px-3 font-sans">
+                              <span
+                                className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                  period.status === 'on-time'
+                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                    : period.status === 'overdue'
+                                    ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                    : 'bg-rose-50 text-rose-700 border border-rose-200'
+                                }`}
+                              >
+                                {period.status}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-gray-500">
+                              {period.paymentDate || '-'}
+                            </td>
+                            <td className="py-2 px-3 text-right text-gray-600">
+                              {formatCurrency(period.openingBalance)}
+                            </td>
+                            <td className="py-2 px-3 text-right text-emerald-700">
+                              +{formatCurrency(period.periodInterest)}
+                            </td>
+                            <td className="py-2 px-3 text-right font-bold text-blue-900">
+                              {formatCurrency(period.closingBalance)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <p className="text-[11px] text-gray-500 leading-relaxed">
+                    Methodology: In each installment period, the scheduled
+                    installment is added to the opening balance, then monthly
+                    interest (annual rate ÷ 12) is calculated and added to form
+                    the closing balance. Combined payments are allocated across
+                    due periods to prevent phantom double-counting.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ==================================================================
+            MATURITY ROLLOVER PROJECTION (Business Rule)
+        ================================================================== */}
+
+        {isMonthly && (
+          <div className="px-6 sm:px-8 pt-7">
+            <div className="rounded-xl border border-gray-200 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setShowRollover(!showRollover)}
+                className="w-full px-5 py-4 bg-gray-50 hover:bg-gray-100/80 transition flex items-center justify-between cursor-pointer border-b border-gray-200 text-left"
+              >
+                <div className="flex items-center gap-2">
+                  <ArrowRightLeft className="w-4 h-4 text-purple-600" />
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900">
+                      Maturity Rollover Rule Projection
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Use matured RD amount as calculation base for subsequent
+                      tenure
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1 text-xs font-semibold text-purple-600">
+                  <span>{showRollover ? 'Hide Projection' : 'Project Rollover'}</span>
+                  {showRollover ? (
+                    <ChevronUp className="w-4 h-4" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4" />
+                  )}
+                </div>
+              </button>
+
+              {showRollover && (
+                <div className="p-5 space-y-4">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-xs font-semibold text-gray-700">
+                      Select Subsequent Duration:
+                    </span>
+                    {[12, 24, 36].map((months) => (
+                      <button
+                        key={months}
+                        type="button"
+                        onClick={() => setRolloverMonths(months)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                          rolloverMonths === months
+                            ? 'bg-purple-600 text-white shadow-sm'
+                            : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                        }`}
+                      >
+                        {months} Months
+                      </button>
+                    ))}
+                  </div>
+
+                  {(() => {
+                    const rolloverCalc = calculateMaturityRollover(
+                      data.maturityAmount,
+                      rolloverMonths,
+                      Number(ratePercent),
+                      data.totalDeposited,
+                      data.totalInterest
+                    );
+
+                    return (
+                      <div className="bg-purple-50/50 rounded-xl p-4 border border-purple-100 space-y-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+                          <div className="bg-white p-3 rounded-lg border border-purple-100">
+                            <span className="text-gray-500 block">
+                              Applicable Maturity Amount
+                            </span>
+                            <span className="text-sm font-bold font-mono text-gray-900 mt-1 block">
+                              {formatCurrency(rolloverCalc.originalMaturityAmount)}
+                            </span>
+                          </div>
+
+                          <div className="bg-white p-3 rounded-lg border border-purple-100">
+                            <span className="text-gray-500 block">
+                              Monthly Calculation Base
+                            </span>
+                            <span className="text-sm font-bold font-mono text-purple-800 mt-1 block">
+                              {formatCurrency(rolloverCalc.monthlyCalculationBase)} / mo
+                            </span>
+                            <span className="text-[10px] text-gray-400 mt-0.5 block">
+                              Maturity ÷ {rolloverMonths} months
+                            </span>
+                          </div>
+
+                          <div className="bg-white p-3 rounded-lg border border-purple-100">
+                            <span className="text-gray-500 block">
+                              Subsequent Interest ({ratePercent}%)
+                            </span>
+                            <span className="text-sm font-bold font-mono text-emerald-700 mt-1 block">
+                              +{formatCurrency(rolloverCalc.subsequentTotalInterest)}
+                            </span>
+                          </div>
+
+                          <div className="bg-white p-3 rounded-lg border border-purple-100">
+                            <span className="text-gray-500 block">
+                              Projected Subsequent Maturity
+                            </span>
+                            <span className="text-sm font-bold font-mono text-purple-950 mt-1 block">
+                              {formatCurrency(rolloverCalc.subsequentMaturityAmount)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="p-3 bg-white rounded-lg border border-purple-100 text-xs text-gray-600 space-y-1 leading-relaxed">
+                          <p>
+                            <strong>Segregation of Funds (No Double-Counting):</strong>
+                          </p>
+                          <p>
+                            • Original RD Principal:{' '}
+                            <strong className="text-gray-900 font-mono">
+                              {formatCurrency(rolloverCalc.originalPrincipal)}
+                            </strong>
+                          </p>
+                          <p>
+                            • Original RD Interest Earned:{' '}
+                            <strong className="text-emerald-700 font-mono">
+                              {formatCurrency(rolloverCalc.originalInterest)}
+                            </strong>
+                          </p>
+                          <p>
+                            • Total Applicable Rollover Base:{' '}
+                            <strong className="text-purple-700 font-mono">
+                              {formatCurrency(rolloverCalc.originalMaturityAmount)}
+                            </strong>
+                          </p>
+                          <p>
+                            • New Interest Generated in {rolloverMonths}-Month Term:{' '}
+                            <strong className="text-emerald-700 font-mono">
+                              {formatCurrency(rolloverCalc.subsequentTotalInterest)}
+                            </strong>
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* ==================================================================
             PHASE 3 - CHARTS

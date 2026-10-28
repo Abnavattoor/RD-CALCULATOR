@@ -15,6 +15,7 @@ import {
 import { parseRDLedgerPDF } from './utils/pdfParser';
 
 import { recalculateRDWithRate } from './utils/rdCalculator';
+import { getDefaultRateForDuration } from './utils/rdInterestCalculator';
 
 import { Header } from './components/Header';
 import { UploadSection } from './components/UploadSection';
@@ -237,16 +238,21 @@ export default function App() {
           }
 
           // -------------------------------------------------------------------
-          // Existing maturity calculation
+          // Maturity calculation using duration-specific default rate
           // -------------------------------------------------------------------
+
+          const initialRate = getDefaultRateForDuration(
+            parsed.rdType as any,
+            parsed.rdType === 'Daily RD' ? (parsed.tenureDays || 365) : 12
+          );
 
           const calculatedData =
             recalculateRDWithRate(
               parsed,
-              12
+              initialRate
             );
 
-          setSelectedInterestRate(12);
+          setSelectedInterestRate(initialRate);
           setAccountData(calculatedData);
           setError(null);
 
@@ -297,16 +303,21 @@ export default function App() {
           }
 
           // -------------------------------------------------------------------
-          // Existing maturity calculation
+          // Maturity calculation using duration-specific default rate
           // -------------------------------------------------------------------
+
+          const initialRate = getDefaultRateForDuration(
+            parsedWithFileInfo.rdType as any,
+            parsedWithFileInfo.rdType === 'Daily RD' ? (parsedWithFileInfo.tenureDays || 365) : 12
+          );
 
           const calculatedData =
             recalculateRDWithRate(
               parsedWithFileInfo,
-              12
+              initialRate
             );
 
-          setSelectedInterestRate(12);
+          setSelectedInterestRate(initialRate);
           setAccountData(calculatedData);
           setError(null);
 
@@ -339,12 +350,17 @@ export default function App() {
             }
           }
 
-          const calculatedData = recalculateRDWithRate(
-            parsedWithFileInfo,
-            12
+          const initialRate = getDefaultRateForDuration(
+            parsedWithFileInfo.rdType as any,
+            parsedWithFileInfo.rdType === 'Daily RD' ? (parsedWithFileInfo.tenureDays || 365) : 12
           );
 
-          setSelectedInterestRate(12);
+          const calculatedData = recalculateRDWithRate(
+            parsedWithFileInfo,
+            initialRate
+          );
+
+          setSelectedInterestRate(initialRate);
           setAccountData(calculatedData);
           setError(null);
 
@@ -744,11 +760,11 @@ export default function App() {
                     <div className="pr-4">
 
                       <h3 className="text-xl font-bold text-gray-900">
-                        Daily RD Interest
+                        RD Interest Calculator
                       </h3>
 
                       <p className="mt-2 text-sm leading-relaxed text-gray-500">
-                        Calculate total deposited and interest earned for daily recurring deposits by number of days.
+                        Calculate total deposited and interest earned for Daily and Monthly recurring deposits with rate adjustment controls.
                       </p>
 
                     </div>
@@ -1168,7 +1184,7 @@ export default function App() {
                   }`}
                 >
                   <Coins className="w-4 h-4" />
-                  Daily RD Interest
+                  RD Interest Calculator
                 </button>
               </div>
 
@@ -1205,6 +1221,11 @@ export default function App() {
                 <InterestRateSelection
                   selectedRate={selectedInterestRate}
                   onRateChange={handleInterestRateChange}
+                  defaultRate={getDefaultRateForDuration(
+                    accountData.rdType as any,
+                    accountData.rdType === 'Daily RD' ? (accountData.tenureDays || 365) : 12
+                  )}
+                  tenureLabel={accountData.period || `${accountData.tenureDays || 365} Days`}
                 />
 
                 <CustomerDetails
