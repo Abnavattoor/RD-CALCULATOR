@@ -6,7 +6,7 @@ import {
   DailyRD90DayAdjustmentDetails,
 } from '../types';
 import { calculateDailyRDMaturity } from './rdInterestCalculator';
-import { calculateDailyRDNonProfitMaturity, roundMaturityY } from './excelParser';
+import { calculateDailyRDNonProfitMaturity, roundMaturityY, parseDate } from './excelParser';
 
 export function roundAmount(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100;
@@ -242,6 +242,8 @@ export function recalculateRDWithRate(
 
     let profitEligibleAmount: number;
     let nonProfitAmount: number;
+    let nonProfitAmountA: number;
+    let adjustedPrincipalX: number;
     let normalizedDailyAmount: number;
     let totalInterest: number;
     let maturityAmount: number;
@@ -257,12 +259,16 @@ export function recalculateRDWithRate(
       const nonProfitRes = calculateDailyRDNonProfitMaturity(
         data.transactions,
         totalDeposited,
-        data.dailySchemeAmount || data.normalizedDailyAmount || 0,
+        data.configuredDailyInstallment || data.dailySchemeAmount || data.normalizedDailyAmount || 100,
         safeRate,
-        tenureDays
+        tenureDays,
+        parseDate(data.openingDate),
+        parseDate(data.maturityDate)
       );
       profitEligibleAmount = nonProfitRes.profitEligibleAmount;
       nonProfitAmount = nonProfitRes.nonProfitAmount;
+      nonProfitAmountA = nonProfitRes.nonProfitAmountA;
+      adjustedPrincipalX = nonProfitRes.adjustedPrincipalX;
       normalizedDailyAmount = nonProfitRes.normalizedDailyAmount;
       totalInterest = nonProfitRes.totalInterest;
       maturityAmount = nonProfitRes.maturityAmount;
@@ -279,6 +285,7 @@ export function recalculateRDWithRate(
           ? data.nonProfitAmount
           : 0
       );
+      nonProfitAmountA = nonProfitAmount;
       postMaturityDeposits = roundAmount(data.postMaturityDeposits || 0);
       const depositsDuringRDPeriod = roundAmount(Math.max(0, totalDeposited - postMaturityDeposits));
       profitEligibleAmount = roundAmount(
@@ -286,6 +293,7 @@ export function recalculateRDWithRate(
           ? data.profitEligibleAmount
           : Math.max(0, depositsDuringRDPeriod - nonProfitAmount)
       );
+      adjustedPrincipalX = profitEligibleAmount;
       normalizedDailyAmount = roundAmount(
         data.normalizedDailyAmount !== undefined && data.normalizedDailyAmount > 0
           ? data.normalizedDailyAmount
@@ -333,6 +341,10 @@ export function recalculateRDWithRate(
       profitEligibleAmount,
 
       nonProfitAmount,
+
+      nonProfitAmountA,
+
+      adjustedPrincipalX,
 
       normalizedDailyAmount,
 

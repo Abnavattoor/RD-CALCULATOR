@@ -1,3 +1,4 @@
+import './domPolyfill';
 import * as pdfjsLib from 'pdfjs-dist';
 
 import {

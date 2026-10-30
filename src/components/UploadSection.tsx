@@ -343,52 +343,40 @@ export const UploadSection: React.FC<
           {/* DESCRIPTION                                                   */}
           {/* ============================================================ */}
 
-          <p className="text-sm text-gray-500 max-w-md mb-5 leading-relaxed">
-
-            Upload your approved Daily RD or Monthly RD Personal Ledger
-            in Excel, PDF, or Document Photo/Scan (NITC Preclosure template supported).
-
+          <p className="text-sm text-gray-500 max-w-lg mb-5 leading-relaxed">
+            Upload your RD document in Excel (.xlsx, .xls), PDF (.pdf), or Image (.jpg, .jpeg, .png).
+            Supports Personal RD Ledgers, Branch Day Sheets, Transaction Statements, and Scanned Documents.
           </p>
 
-
           {/* ============================================================ */}
-          {/* SUPPORTED FILE BADGES                                         */}
+          {/* SUPPORTED FILE BADGES & CATEGORIES                            */}
           {/* ============================================================ */}
 
-          <div className="flex flex-wrap items-center justify-center gap-2 mb-6">
-
-            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-green-50 border border-green-100 text-xs font-semibold text-green-700">
-
+          <div className="flex flex-wrap items-center justify-center gap-2 mb-4">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-200 text-xs font-bold text-emerald-800">
               <FileSpreadsheet className="w-3.5 h-3.5" />
-
-              XLSX / XLS
-
+              Excel (.xlsx, .xls)
             </span>
 
-
-            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-red-50 border border-red-100 text-xs font-semibold text-red-700">
-
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-rose-50 border border-rose-200 text-xs font-bold text-rose-800">
               <FileText className="w-3.5 h-3.5" />
-
-              PDF
-
+              PDF (.pdf)
             </span>
 
-
-            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-50 border border-indigo-100 text-xs font-semibold text-indigo-700">
-
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-50 border border-indigo-200 text-xs font-bold text-indigo-800">
               <ImageIcon className="w-3.5 h-3.5" />
-
-              JPG / PNG
-
+              Images (.jpg, .png)
             </span>
+          </div>
 
-            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-100 text-xs font-semibold text-amber-700">
-
-              NITC India Template
-
-            </span>
-
+          <div className="flex flex-wrap items-center justify-center gap-1.5 text-[11px] font-medium text-gray-400 mb-6 max-w-md">
+            <span className="bg-gray-100 px-2 py-0.5 rounded text-gray-600">Personal RD Ledger</span>
+            <span>•</span>
+            <span className="bg-gray-100 px-2 py-0.5 rounded text-gray-600">Branch Day Sheet</span>
+            <span>•</span>
+            <span className="bg-gray-100 px-2 py-0.5 rounded text-gray-600">Transaction Statement</span>
+            <span>•</span>
+            <span className="bg-gray-100 px-2 py-0.5 rounded text-gray-600">Scanned Ledger / Day Sheet</span>
           </div>
 
 

@@ -27,6 +27,10 @@ export interface LedgerTransactionRow {
   transactionType?: string;
   amount?: number;
   receiptNumber?: string;
+  rowPageRef?: string;
+  validationStatus?: 'Valid' | 'Uncertain' | 'Excluded';
+  originalValues?: Record<string, any>;
+  uncertainFieldWarnings?: string[];
 }
 
 export interface MonthlyRDInstallmentPeriod {
@@ -132,6 +136,19 @@ export interface RDAccountData {
   preClosureCharges?: number;
   netPayment?: number;
   missingFieldsWarning?: string;
+
+  // Document classification & verification metadata
+  documentCategory?:
+    | 'Personal RD Ledger'
+    | 'Branch Day Sheet'
+    | 'Customer Transaction Statement'
+    | 'Scanned Personal Ledger'
+    | 'Scanned Day Sheet'
+    | string;
+  documentFormat?: 'Excel' | 'PDF' | 'Image';
+  extractionWarnings?: string[];
+  rawExtractionConfidence?: number;
+  configuredDailyInstallment?: number;
 
   // Day Sheet fields
   isDaySheet?: boolean;

@@ -576,215 +576,16 @@ function gcd(
 function determineDailySchemeAmount(
   transactions: LedgerTransactionRow[],
   totalAmount: number,
-  tenureDays: number
+  tenureDays: number = 365,
+  configuredSchemeAmount?: number,
+  schemeName?: string
 ): number {
-  const validTransactions =
-    transactions.filter(
-      (transaction) =>
-        transaction.isValidPayment &&
-        transaction.receiptCredit !== null &&
-        Number(
-          transaction.receiptCredit
-        ) > 0
-    );
-
-  if (
-    validTransactions.length === 0
-  ) {
-    return roundMoney(
-      totalAmount /
-        Math.max(tenureDays, 1)
-    );
-  }
-
-  /**
-   * First try explicit installment
-   * descriptions.
-   */
-  const explicitCandidates: number[] =
-    [];
-
-  for (
-    const transaction
-    of validTransactions
-  ) {
-    const amount =
-      Number(
-        transaction.receiptCredit
-      );
-
-    const count =
-      parseInstallmentCount(
-        transaction.particulars
-      );
-
-    if (
-      count &&
-      count > 0 &&
-      amount > 0
-    ) {
-      const candidate =
-        amount / count;
-
-      if (candidate > 0) {
-        explicitCandidates.push(
-          candidate
-        );
-      }
-    }
-  }
-
-  if (
-    explicitCandidates.length > 0
-  ) {
-    const frequency =
-      new Map<number, number>();
-
-    for (
-      const candidate
-      of explicitCandidates
-    ) {
-      const value =
-        roundMoney(candidate);
-
-      frequency.set(
-        value,
-        (frequency.get(value) || 0) + 1
-      );
-    }
-
-    let bestValue =
-      explicitCandidates[0];
-
-    let bestCount = 0;
-
-    for (
-      const [value, count]
-      of frequency.entries()
-    ) {
-      if (
-        count > bestCount ||
-        (
-          count === bestCount &&
-          value < bestValue
-        )
-      ) {
-        bestValue = value;
-        bestCount = count;
-      }
-    }
-
-    if (bestValue > 0) {
-      return roundMoney(
-        bestValue
-      );
-    }
-  }
-
-  /**
-   * Next method: GCD of all
-   * actual receipt amounts.
-   */
-  const amounts =
-    validTransactions
-      .map((transaction) =>
-        roundMoney(
-          Number(
-            transaction.receiptCredit
-          )
-        )
-      )
-      .filter(
-        (amount) => amount > 0
-      );
-
-  if (amounts.length > 0) {
-    const integerAmounts =
-      amounts.map(
-        (amount) =>
-          Math.round(amount * 100)
-      );
-
-    let common =
-      integerAmounts[0];
-
-    for (
-      let index = 1;
-      index < integerAmounts.length;
-      index++
-    ) {
-      common =
-        gcd(
-          common,
-          integerAmounts[index]
-        );
-
-      if (common === 1) {
-        break;
-      }
-    }
-
-    const gcdAmount =
-      common / 100;
-
-    if (gcdAmount >= 1) {
-      return roundMoney(
-        gcdAmount
-      );
-    }
-
-    /**
-     * Last fallback:
-     * smallest positive recurring
-     * payment.
-     */
-    const frequency =
-      new Map<number, number>();
-
-    for (
-      const amount of amounts
-    ) {
-      frequency.set(
-        amount,
-        (frequency.get(amount) || 0) + 1
-      );
-    }
-
-    let smallestRecurring =
-      amounts[0];
-
-    let smallestCount =
-      frequency.get(
-        smallestRecurring
-      ) || 0;
-
-    for (
-      const [amount, count]
-      of frequency.entries()
-    ) {
-      if (
-        count > smallestCount ||
-        (
-          count === smallestCount &&
-          amount < smallestRecurring
-        )
-      ) {
-        smallestRecurring =
-          amount;
-
-        smallestCount =
-          count;
-      }
-    }
-
-    return roundMoney(
-      smallestRecurring
-    );
-  }
-
-  return roundMoney(
-    totalAmount /
-      Math.max(tenureDays, 1)
+  return determineDailyInstallment(
+    transactions,
+    totalAmount,
+    tenureDays,
+    configuredSchemeAmount,
+    schemeName
   );
 }
 
@@ -826,28 +627,53 @@ export function normalizeHeaderName(val: unknown): string {
 }
 
 /**
+ * Regular expression to match duration and tenure declarations:
+ * 1YR, 1 YR, 1YEAR, 2 YRS, 365 DAYS, 12 MONTHS, 52 WEEKS, etc.
+ * Ensures tenure numbers like "1" in "1YR" are never mistaken for installment amounts.
+ */
+export const DURATION_REGEX = /\b\d+\s*(?:years?|yrs?|yr|months?|mths?|mth|mo|weeks?|wks?|wk|days?|d)\b/gi;
+
+/**
  * Determine the Daily RD scheme installment amount.
  *
  * Prioritizes:
  * 1. Configured scheme installment amount (if explicitly provided or parsed from metadata).
- * 2. Explicit installment declarations in particulars (e.g. "DRD 100", "Daily RD 100", "₹100/day").
- * 3. Explicit installment counts in particulars (e.g. "₹1,000 - 10 INSTALLMENTS" -> candidate 1000 / 10 = 100).
- * 4. Combined and irregular payment analysis:
- *    - Does NOT assume the most frequent transaction amount is always the actual daily installment
- *      when customers make combined payments (e.g. ₹500 or ₹1,000 paid multiple times).
- *    - Analyzes GCD and base divisors to uncover the underlying daily installment.
- * 5. Most frequent deposit amount (mode) when deposits are regular and consistent.
- * 6. Fallback: totalAmount / tenureDays.
+ * 2. Explicit installment declarations in scheme name or particulars (e.g. "DRD 100", "Daily RD 100", "₹100/day").
+ * 3. Standard company Daily RD scheme code (RCD / DRD defaults to contractual ₹100 unless explicitly specified otherwise).
+ * 4. Explicit installment counts in particulars (e.g. "₹1,000 - 10 INSTALLMENTS" -> candidate 1000 / 10 = 100).
+ * 5. Combined and irregular payment analysis (GCD and divisors for multiples of the daily deposit).
+ * 6. Most frequent deposit amount (mode) when deposits are regular and consistent.
+ * 7. Fallback: totalAmount / tenureDays.
  */
 export function determineDailyInstallment(
   transactions: LedgerTransactionRow[],
   totalAmount: number,
   tenureDays: number = 365,
-  configuredSchemeAmount?: number
+  configuredSchemeAmount?: number,
+  schemeName?: string
 ): number {
   // 1. Prioritize explicitly configured scheme installment amount
   if (configuredSchemeAmount !== undefined && configuredSchemeAmount !== null && configuredSchemeAmount > 0) {
     return roundMoney(configuredSchemeAmount);
+  }
+
+  // 2. Check schemeName if provided
+  if (schemeName) {
+    const cleaned = schemeName
+      .replace(DURATION_REGEX, ' ')
+      .replace(/(?:rec(?:eipt)?|vch|voucher|sl\s*no|bill|no)\.?\s*[-#:]?\s*\d+/gi, ' ');
+    const match =
+      cleaned.match(/(?:drd|daily\s*rd|rcd)\s*[-#:]?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)/i) ||
+      cleaned.match(/(?:daily\s*installment|scheme\s*amount|daily\s*scheme|daily\s*amount|installment\s*amount)\s*[-#:]?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)/i) ||
+      cleaned.match(/(\d+(?:\.\d+)?)\s*(?:\/|\bper\b)\s*day/i);
+    if (match) {
+      const val = parseFloat(match[1]);
+      if (val > 0 && val <= 100000) return roundMoney(val);
+    }
+    // Company standard Daily RD scheme code: RCD / DRD has contractual daily installment of ₹100
+    if (/^(?:rcd|drd|daily\s*rd)\b/i.test(cleaned.trim())) {
+      return 100;
+    }
   }
 
   const validTransactions = transactions.filter(
@@ -858,12 +684,12 @@ export function determineDailyInstallment(
     return roundMoney(totalAmount / Math.max(1, tenureDays));
   }
 
-  // 2. Check scheme text / particulars, ignoring tenure declarations and receipt/voucher numbers
+  // 3. Check particulars, ignoring tenure declarations and receipt/voucher numbers
   for (const t of validTransactions) {
     const text = (t.particulars || '').toLowerCase();
     const cleaned = text
-      .replace(/(?:rec(?:eipt)?|vch|voucher|sl\s*no|bill|no)\.?\s*[-#:]?\s*\d+/gi, '')
-      .replace(/\d+\s*(?:days?|months?|years?|d|m|y)\b/gi, '');
+      .replace(/(?:rec(?:eipt)?|vch|voucher|sl\s*no|bill|no)\.?\s*[-#:]?\s*\d+/gi, ' ')
+      .replace(DURATION_REGEX, ' ');
     const match =
       cleaned.match(/(?:drd|daily\s*rd|rcd)\s*[-#:]?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)/i) ||
       cleaned.match(/(?:daily\s*installment|scheme\s*amount|daily\s*scheme|daily\s*amount|installment\s*amount)\s*[-#:]?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)/i) ||
@@ -874,7 +700,7 @@ export function determineDailyInstallment(
     }
   }
 
-  // 3. Check for explicit installment counts in particulars (e.g. "₹1,000 - 10 INSTALLMENT" -> candidate 1000 / 10 = 100)
+  // 4. Check for explicit installment counts in particulars (e.g. "₹1,000 - 10 INSTALLMENT" -> candidate 1000 / 10 = 100)
   const explicitCandidates: number[] = [];
   for (const t of validTransactions) {
     const amt = Number(t.receiptCredit) || 0;
@@ -902,7 +728,7 @@ export function determineDailyInstallment(
     if (best > 0) return best;
   }
 
-  // 4. Combined and irregular payment analysis:
+  // 5. Combined and irregular payment analysis:
   // Customers often pay for multiple days at once (e.g., ₹500, ₹1000, ₹2000).
   const amounts = validTransactions
     .map((t) => roundMoney(Number(t.receiptCredit)))
@@ -917,13 +743,14 @@ export function determineDailyInstallment(
     }
     const gcdVal = commonGcd / 100;
     const maxPayment = Math.max(...amounts);
-    if (gcdVal >= 10 && (gcdVal < maxPayment || amounts.length === 1)) {
+    // Plausible daily installment is between ₹10 and ₹2,000
+    if (gcdVal >= 10 && gcdVal <= 2000 && (gcdVal < maxPayment || (amounts.length === 1 && gcdVal <= 1000))) {
       return roundMoney(gcdVal);
     }
 
     // Check if the minimum positive deposit evenly divides all higher combined deposits
     const minDeposit = Math.min(...amounts);
-    if (minDeposit >= 10 && minDeposit < maxPayment) {
+    if (minDeposit >= 10 && minDeposit <= 2000 && minDeposit < maxPayment) {
       const allDivisible = amounts.every(
         (a) => Math.abs(a % minDeposit) < 0.01 || Math.abs((a % minDeposit) - minDeposit) < 0.01
       );
@@ -933,10 +760,12 @@ export function determineDailyInstallment(
     }
   }
 
-  // 5. Deposit amount frequency (mode) among valid deposits when not a combined payment
+  // 6. Deposit amount frequency (mode) among valid deposits when <= 2000
   const amountCounts = new Map<number, number>();
   for (const amt of amounts) {
-    amountCounts.set(amt, (amountCounts.get(amt) || 0) + 1);
+    if (amt <= 2000) {
+      amountCounts.set(amt, (amountCounts.get(amt) || 0) + 1);
+    }
   }
 
   if (amountCounts.size > 0) {
@@ -951,8 +780,22 @@ export function determineDailyInstallment(
     if (bestAmt > 0) return bestAmt;
   }
 
-  // 6. Fallback
-  return roundMoney(totalAmount / Math.max(1, tenureDays));
+  // 7. Check if any particulars indicate RCD / DRD
+  for (const t of validTransactions) {
+    const p = (t.particulars || '').toLowerCase();
+    if (p.includes('rcd') || p.includes('drd')) {
+      return 100;
+    }
+  }
+
+  // 8. If total amount is close to multiple of 100 for 365/366 days (e.g. 36500 or 36600)
+  const perDay = totalAmount / Math.max(1, tenureDays);
+  if (Math.abs(perDay - 100) <= 2) {
+    return 100;
+  }
+
+  // 9. Fallback
+  return roundMoney(perDay);
 }
 
 /**
@@ -1070,30 +913,69 @@ export function calculateDailyRDNonProfitMaturity(
   totalAmount: number,
   dailyAmount: number,
   annualRate: number,
-  tenureDays: number = 365
+  tenureDays: number = 365,
+  accountOpeningDate?: Date | null,
+  accountMaturityDate?: Date | null,
+  schemeName?: string
 ) {
   // Filter valid transactions with positive deposit amount
   const validTxns = transactions.filter(
     (t) => t.isValidPayment && !t.isSummaryRow && !t.isClosureRow && t.receiptCredit !== null && Number(t.receiptCredit) > 0
   );
 
-  // Find true earliest installment date
-  let firstInstallmentDate: Date | null = null;
-  for (const t of validTxns) {
-    const d = getTransactionDate(t);
-    if (d && (!firstInstallmentDate || d.getTime() < firstInstallmentDate.getTime())) {
-      firstInstallmentDate = d;
-    }
-  }
-  if (!firstInstallmentDate) firstInstallmentDate = new Date();
   const cleanTenure = Math.max(1, tenureDays);
 
-  // 1. Maturity date = firstInstallmentDate + tenureDays for a Daily RD (skipped installments do NOT change maturity date)
-  const maturityDateObj = new Date(
-    firstInstallmentDate.getFullYear(),
-    firstInstallmentDate.getMonth(),
-    firstInstallmentDate.getDate() + cleanTenure
-  );
+  // 1. Resolve firstInstallmentDate and maturityDateObj
+  // Business rule: Maturity date = First installment date + RD duration (365 days).
+  // Missed installments must not change the maturity date.
+  let firstInstallmentDate: Date | null = null;
+  let maturityDateObj: Date | null = null;
+
+  if (accountMaturityDate && !isNaN(accountMaturityDate.getTime())) {
+    maturityDateObj = new Date(
+      accountMaturityDate.getFullYear(),
+      accountMaturityDate.getMonth(),
+      accountMaturityDate.getDate()
+    );
+    if (accountOpeningDate && !isNaN(accountOpeningDate.getTime())) {
+      firstInstallmentDate = new Date(
+        accountOpeningDate.getFullYear(),
+        accountOpeningDate.getMonth(),
+        accountOpeningDate.getDate()
+      );
+    } else {
+      firstInstallmentDate = new Date(
+        maturityDateObj.getFullYear(),
+        maturityDateObj.getMonth(),
+        maturityDateObj.getDate() - cleanTenure
+      );
+    }
+  } else if (accountOpeningDate && !isNaN(accountOpeningDate.getTime())) {
+    firstInstallmentDate = new Date(
+      accountOpeningDate.getFullYear(),
+      accountOpeningDate.getMonth(),
+      accountOpeningDate.getDate()
+    );
+    maturityDateObj = new Date(
+      firstInstallmentDate.getFullYear(),
+      firstInstallmentDate.getMonth(),
+      firstInstallmentDate.getDate() + cleanTenure
+    );
+  } else {
+    // If not explicitly provided in metadata, determine from earliest transaction date
+    for (const t of validTxns) {
+      const d = getTransactionDate(t);
+      if (d && (!firstInstallmentDate || d.getTime() < firstInstallmentDate.getTime())) {
+        firstInstallmentDate = d;
+      }
+    }
+    if (!firstInstallmentDate) firstInstallmentDate = new Date();
+    maturityDateObj = new Date(
+      firstInstallmentDate.getFullYear(),
+      firstInstallmentDate.getMonth(),
+      firstInstallmentDate.getDate() + cleanTenure
+    );
+  }
 
   // 2. Period start = maturityDate - 89 calendar days (90-day window including both start date and maturity date)
   const periodStartObj = new Date(
@@ -1167,7 +1049,7 @@ export function calculateDailyRDNonProfitMaturity(
   const normalizedDailyAmount =
     dailyAmount > 0
       ? roundMoney(dailyAmount)
-      : roundMoney(determineDailyInstallment(sortedTxns, totalActualDeposits, cleanTenure, dailyAmount));
+      : roundMoney(determineDailyInstallment(sortedTxns, totalActualDeposits, cleanTenure, dailyAmount, schemeName));
 
   // 4. Required 90-day amount = Daily Installment * 90
   const required90DayAmount = roundMoney(normalizedDailyAmount * 90);
@@ -1251,25 +1133,34 @@ function calculateDailyRD(
   totalAmount: number,
   dailyAmount: number,
   annualRate: number,
-  tenureDays: number
+  tenureDays: number,
+  accountOpeningDate?: Date | null,
+  accountMaturityDate?: Date | null,
+  schemeName?: string
 ) {
   const result = calculateDailyRDNonProfitMaturity(
     transactions,
     totalAmount,
     dailyAmount,
     annualRate,
-    tenureDays
+    tenureDays,
+    accountOpeningDate,
+    accountMaturityDate,
+    schemeName
   );
 
   return {
     dailySchemeAmount: result.dailySchemeAmount,
     profitEligibleAmount: result.profitEligibleAmount,
     nonProfitAmount: result.nonProfitAmount,
+    nonProfitAmountA: result.nonProfitAmountA,
+    adjustedPrincipalX: result.adjustedPrincipalX,
     normalizedDailyAmount: result.normalizedDailyAmount,
     totalInterest: result.totalInterest,
     maturityAmount: result.maturityAmount,
     required90DayAmount: result.required90DayAmount,
     actualFinal90DayDeposits: result.actualFinal90DayDeposits,
+    final90DayCollectionCount: result.final90DayCollectionCount,
     calculationResultY: result.calculationResultY,
     roundedY: result.roundedY,
     dailyRDAdjustment: result.dailyRDAdjustment,
@@ -1287,6 +1178,8 @@ export interface DaySheetColumns {
   bondNoCol: number;
   schemeCol: number;
   natureCol: number;
+  bondDateCol?: number;
+  maturityDateCol?: number;
 }
 
 /**
@@ -1302,6 +1195,8 @@ export function detectDaySheetHeader(row: any[]): DaySheetColumns | null {
   let bondNoCol = -1;
   let schemeCol = -1;
   let natureCol = -1;
+  let bondDateCol = -1;
+  let maturityDateCol = -1;
 
   for (let c = 0; c < row.length; c++) {
     const raw = row[c];
@@ -1383,6 +1278,25 @@ export function detectDaySheetHeader(row: any[]): DaySheetColumns | null {
     ) {
       natureCol = c;
     }
+    // BOND / OPENING DATE
+    else if (
+      h === 'bonddate' ||
+      h === 'openingdate' ||
+      h === 'startdate' ||
+      h === 'acopeningdate' ||
+      h === 'dateofopening'
+    ) {
+      bondDateCol = c;
+    }
+    // MATURITY DATE
+    else if (
+      h === 'maturitydate' ||
+      h === 'matdate' ||
+      h === 'duedate' ||
+      h === 'completiondate'
+    ) {
+      maturityDateCol = c;
+    }
   }
 
   // A Day sheet must have DATE and AMOUNT, and at least two identifying columns
@@ -1399,6 +1313,8 @@ export function detectDaySheetHeader(row: any[]): DaySheetColumns | null {
       bondNoCol,
       schemeCol,
       natureCol,
+      bondDateCol: bondDateCol !== -1 ? bondDateCol : undefined,
+      maturityDateCol: maturityDateCol !== -1 ? maturityDateCol : undefined,
     };
   }
 
@@ -1423,6 +1339,8 @@ export function parseDaySheetRows(
     membershipId: string;
     bondNumber: string;
     schemeName: string;
+    bondDate?: Date | null;
+    maturityDate?: Date | null;
     transactions: LedgerTransactionRow[];
     totalDeposited: number;
   }
@@ -1452,6 +1370,8 @@ export function parseDaySheetRows(
     const bondNo = cols.bondNoCol !== -1 ? String(row[cols.bondNoCol] || '').trim() : '';
     const scheme = cols.schemeCol !== -1 ? String(row[cols.schemeCol] || '').trim() : '';
     const nature = cols.natureCol !== -1 ? String(row[cols.natureCol] || '').trim() : '';
+    const rawBondDate = cols.bondDateCol !== undefined && cols.bondDateCol !== -1 ? row[cols.bondDateCol] : null;
+    const rawMatDate = cols.maturityDateCol !== undefined && cols.maturityDateCol !== -1 ? row[cols.maturityDateCol] : null;
 
     // Discard non-deposit entries or non-RD receipts
     const lowerNature = nature.toLowerCase();
@@ -1503,6 +1423,8 @@ export function parseDaySheetRows(
         membershipId: memId || 'Not Specified',
         bondNumber: bondNo || 'Not Specified',
         schemeName: scheme,
+        bondDate: rawBondDate ? parseDate(rawBondDate) : null,
+        maturityDate: rawMatDate ? parseDate(rawMatDate) : null,
         transactions: [],
         totalDeposited: 0,
       };
@@ -1520,6 +1442,12 @@ export function parseDaySheetRows(
     }
     if (!group.schemeName && scheme) {
       group.schemeName = scheme;
+    }
+    if (!group.bondDate && rawBondDate) {
+      group.bondDate = parseDate(rawBondDate);
+    }
+    if (!group.maturityDate && rawMatDate) {
+      group.maturityDate = parseDate(rawMatDate);
     }
 
     const isCollection =
@@ -1599,10 +1527,11 @@ export function parseDaySheetRows(
   const annualRate = 12.0;
 
   // Detect daily installment from scheme or particulars if available
+  // Important: Strip tenure declarations like 1YR so they are never parsed as a 1 rupee installment
   let detectedSchemeDaily = 0;
   if (activeGroup.schemeName) {
     const cleanedScheme = activeGroup.schemeName
-      .replace(/\d+\s*(?:days?|months?|years?|d|m|y)\b/gi, '')
+      .replace(DURATION_REGEX, '')
       .replace(/(?:rec(?:eipt)?|vch|voucher|sl\s*no|bill|no)\.?\s*[-#:]?\s*\d+/gi, '');
     const m =
       cleanedScheme.match(/(?:drd|daily\s*rd|rcd)\s*[-#:]?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)/i) ||
@@ -1614,12 +1543,23 @@ export function parseDaySheetRows(
     }
   }
 
+  const dailyInstallment = determineDailyInstallment(
+    activeGroup.transactions,
+    activeGroup.totalDeposited,
+    tenureDays,
+    detectedSchemeDaily || undefined,
+    activeGroup.schemeName
+  );
+
   const result = calculateDailyRDNonProfitMaturity(
     activeGroup.transactions,
     activeGroup.totalDeposited,
-    detectedSchemeDaily,
+    dailyInstallment,
     annualRate,
-    tenureDays
+    tenureDays,
+    activeGroup.bondDate || null,
+    activeGroup.maturityDate || null,
+    activeGroup.schemeName
   );
 
   return {
@@ -2251,6 +2191,8 @@ export function parseRDLedgerWorkbook(
   let status = '';
   let period = '';
   let explicitRDTypeText = '';
+  let schemeName = '';
+  let schemeAmount: number | undefined;
 
   const metadataRowsLimit =
     transactionHeaderRowIdx > 0
@@ -2686,6 +2628,74 @@ export function parseRDLedgerWorkbook(
           if (next) {
             period =
               next;
+          }
+        }
+      }
+      /**
+       * SCHEME NAME / PLAN
+       */
+      if (!schemeName) {
+        const regex =
+          /(?:scheme\s*name|scheme|plan)\s*[:\-]\s*(.+)/i;
+        const match =
+          cellValue.match(regex);
+        if (
+          match &&
+          match[1]?.trim()
+        ) {
+          schemeName =
+            match[1].trim();
+        } else if (
+          label === 'scheme name' ||
+          label === 'scheme' ||
+          label === 'plan'
+        ) {
+          const next =
+            String(
+              getNextCellVal(
+                row,
+                columnIndex
+              )
+            ).trim();
+          if (next) {
+            schemeName = next;
+          }
+        }
+      }
+
+      /**
+       * SCHEME AMOUNT / DAILY INSTALLMENT
+       */
+      if (schemeAmount === undefined) {
+        const regex =
+          /(?:daily\s*installment|installment\s*amount|inst\s*amount|scheme\s*amount|daily\s*amount)\s*[:\-]\s*(.+)/i;
+        const match =
+          cellValue.match(regex);
+        if (
+          match &&
+          match[1]?.trim()
+        ) {
+          const val =
+            parseNumericAmount(match[1]);
+          if (val && val > 0) {
+            schemeAmount = val;
+          }
+        } else if (
+          label === 'daily installment' ||
+          label === 'installment amount' ||
+          label === 'inst amount' ||
+          label === 'scheme amount' ||
+          label === 'daily amount'
+        ) {
+          const next =
+            parseNumericAmount(
+              getNextCellVal(
+                row,
+                columnIndex
+              )
+            );
+          if (next && next > 0) {
+            schemeAmount = next;
           }
         }
       }
@@ -3546,6 +3556,13 @@ export function parseRDLedgerWorkbook(
         maturityDateObj
       );
   } else {
+    if (!parseDate(openingDate)) {
+      openingDateObj = new Date(
+        maturityDateObj.getTime() - tenureDays * 24 * 60 * 60 * 1000
+      );
+      openingDate = formatDateDisplay(openingDateObj);
+    }
+
     maturityDate =
       formatDateDisplay(
         maturityDateObj
@@ -3658,10 +3675,12 @@ export function parseRDLedgerWorkbook(
      * Daily Scheme = ₹200
      */
     const dailySchemeAmount =
-      determineDailySchemeAmount(
+      determineDailyInstallment(
         rawTransactions,
         roundedTotalDeposited,
-        tenureDays
+        tenureDays,
+        schemeAmount,
+        schemeName
       );
 
     const calculation =
@@ -3670,7 +3689,10 @@ export function parseRDLedgerWorkbook(
         roundedTotalDeposited,
         dailySchemeAmount,
         annualRate,
-        tenureDays
+        tenureDays,
+        openingDateObj,
+        maturityDateObj,
+        schemeName
       );
 
     return {
@@ -3721,6 +3743,12 @@ export function parseRDLedgerWorkbook(
       nonProfitAmount:
         calculation.nonProfitAmount,
 
+      nonProfitAmountA:
+        calculation.nonProfitAmountA,
+
+      adjustedPrincipalX:
+        calculation.adjustedPrincipalX,
+
       normalizedDailyAmount:
         calculation.normalizedDailyAmount,
 
@@ -3732,6 +3760,9 @@ export function parseRDLedgerWorkbook(
 
       actualFinal90DayDeposits:
         calculation.actualFinal90DayDeposits,
+
+      final90DayCollectionCount:
+        calculation.final90DayCollectionCount,
 
       required90DayAmount:
         calculation.required90DayAmount,

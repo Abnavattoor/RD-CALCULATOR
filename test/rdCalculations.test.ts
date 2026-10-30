@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import '../src/utils/domPolyfill';
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -43,6 +44,12 @@ import {
   isCollectionTransaction,
   getTransactionDate,
 } from '../src/utils/excelParser';
+import {
+  excelAdapter,
+  pdfAdapter,
+  imageAdapter,
+} from '../src/utils/adapters/documentProcessor';
+import { processMultiFormatDocument } from '../src/utils/adapters/documentProcessor';
 import type { RDAccountData, LedgerTransactionRow } from '../src/types';
 
 describe('RD Calculation & Interest-Rate Controls Test Suite', () => {
@@ -2037,6 +2044,274 @@ describe('RD Calculation & Interest-Rate Controls Test Suite', () => {
         assert.equal(parsed.adjustedPrincipalX, 29500);
         assert.equal(parsed.roundedY, 31338);
         assert.equal(parsed.maturityAmount, 38338);
+      });
+
+      // =======================================================================
+      // DEDICATED CUSTOMER TEST CASES: SOJAN SUNNY AND SHINITHA
+      // =======================================================================
+      test('Test Case 1 — SOJAN SUNNY (RCD 1YR RRN with 21 collections in final 90 days)', () => {
+        // Construct Sojan Sunny Day Sheet / Ledger with "RCD 1YR RRN" scheme
+        // Prior to bug fix, "1YR" was captured as daily installment ₹1, required amount ₹90, A = ₹20,910.
+        // With fix: Daily installment = ₹100, Required amount = ₹9,000, A = ₹12,000, X = ₹24,600, Final = ₹38,132.
+        const headers = [
+          'SL NO',
+          'BRANCH',
+          'DATE',
+          'BOND NO',
+          'MEM ID',
+          'CUSTOMER NAME',
+          'SCHEME NAME & PLAN',
+          'AMOUNT',
+          'NATURE OF RECEIPT',
+        ];
+
+        const rows: any[][] = [
+          ['XYZ COOPERATIVE CREDIT SOCIETY', '', '', '', '', '', '', '', ''],
+          ['DAY SHEET REPORT', '', '', '', '', '', '', '', ''],
+          headers,
+        ];
+
+        // Earlier collections outside the final 90 days:
+        // Total deposited is ₹36,600; final 90 days deposits = ₹21,000.
+        // Therefore deposits prior to final 90 days = ₹15,600.
+        // Say opening deposit on 01/01/2025 = ₹15,600
+        rows.push([1, 'MAIN', '01/01/2025', '38091068', 'MEM-101', 'SOJAN SUNNY', 'RCD 1YR RRN', 15600, 'COLLECTION']);
+
+        // 21 qualifying collection transactions in the final 90 days (Oct - Dec 2025)
+        // 21 transactions summing to ₹21,000 (e.g. 21 deposits of ₹1,000 each)
+        for (let i = 1; i <= 21; i++) {
+          // Dates between Oct 5 and Dec 31, 2025 (within final 90 days of 01/01/2026)
+          const day = (i <= 15) ? String(i + 10).padStart(2, '0') : String(i - 15).padStart(2, '0');
+          const month = (i <= 15) ? '10' : '11';
+          rows.push([
+            i + 1,
+            'MAIN',
+            `${day}/${month}/2025`,
+            '38091068',
+            'MEM-101',
+            'SOJAN SUNNY',
+            'RCD 1YR RRN',
+            1000,
+            `DAILY COLLECTION #${i}`,
+          ]);
+        }
+
+        const wb = XLSX.utils.book_new();
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        XLSX.utils.book_append_sheet(wb, ws, 'Sheet2');
+        const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+
+        const parsed = parseRDLedgerWorkbook(buf, 'SOJAN SUNNY.xlsx', buf.byteLength);
+
+        // Verification of all test case values
+        assert.equal(parsed.customerName, 'SOJAN SUNNY');
+        assert.equal(parsed.totalDeposited, 36600);
+        assert.equal(parsed.final90DayCollectionCount, 21);
+        assert.equal(parsed.actualFinal90DayDeposits, 21000);
+        assert.equal(parsed.dailySchemeAmount, 100);
+        assert.equal(parsed.required90DayAmount, 9000);
+        assert.equal(parsed.nonProfitAmountA, 12000);
+        assert.equal(parsed.adjustedPrincipalX, 24600);
+        assert.equal(parsed.returnRate, 12);
+        assert.equal(parsed.tenureDays, 365);
+        assert.equal(parsed.roundedY, 26132);
+        assert.equal(parsed.maturityAmount, 38132);
+
+        // Recalculate with rate test
+        const recalc = recalculateRDWithRate(parsed, 12);
+        assert.equal(recalc.maturityAmount, 38132);
+        assert.equal(recalc.nonProfitAmountA, 12000);
+        assert.equal(recalc.adjustedPrincipalX, 24600);
+      });
+
+      test('Test Case 2 — SHINITHA (1 single collection of ₹36,600 in final 90 days)', () => {
+        // Construct Shinitha Personal Ledger / Day Sheet:
+        // Contractual daily installment: ₹100
+        // Total actual deposits: ₹36,600
+        // Actual qualifying final 90-day deposits: ₹36,600 (1 transaction)
+        // Required 90-day amount: ₹9,000 (100 × 90)
+        // Non-profit amount A: ₹27,600 (36,600 − 9,000)
+        // Adjusted principal X: ₹9,000 (36,600 − 27,600)
+        // Raw Y: 9560.633228...
+        // Rounded Y: 9,561
+        // Final maturity amount: 37,161 (9,561 + 27,600)
+        const rows: any[][] = [
+          ['CUSTOMER PERSONAL LEDGER', '', '', '', ''],
+          ['Customer Name:', 'SHINITHA', 'A/c No:', '41029384', ''],
+          ['A/c Opening Date:', '01/01/2025', 'Maturity Date:', '01/01/2026', ''],
+          ['Period:', '365 DAYS', 'Interest Rate:', '12.00%', ''],
+          ['Scheme Name:', 'RCD 1YR RRN', 'Status:', 'ACTIVE', ''],
+          ['', '', '', '', ''],
+          ['DATE', 'PARTICULARS', 'RECEIPT / CREDIT', 'PAYMENT / DEBIT', 'BALANCE'],
+          ['15/11/2025', 'RCD 1YR RRN COLLECTION', 36600, '', 36600],
+        ];
+
+        const wb = XLSX.utils.book_new();
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        XLSX.utils.book_append_sheet(wb, ws, 'Ledger');
+        const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+
+        const parsed = parseRDLedgerWorkbook(buf, 'SHINITHA.xlsx', buf.byteLength);
+
+        // Verification of all test case values
+        assert.equal(parsed.customerName, 'SHINITHA');
+        assert.equal(parsed.accountNumber, '41029384');
+        assert.equal(parsed.totalDeposited, 36600);
+        assert.equal(parsed.final90DayCollectionCount, 1);
+        assert.equal(parsed.actualFinal90DayDeposits, 36600);
+        assert.equal(parsed.dailySchemeAmount, 100);
+        assert.equal(parsed.required90DayAmount, 9000);
+        assert.equal(parsed.nonProfitAmountA, 27600);
+        assert.equal(parsed.adjustedPrincipalX, 9000);
+        assert.equal(parsed.returnRate, 12);
+        assert.equal(parsed.tenureDays, 365);
+        assert.equal(parsed.roundedY, 9561);
+        assert.equal(parsed.maturityAmount, 37161);
+
+        // Recalculate with rate test
+        const recalc = recalculateRDWithRate(parsed, 12);
+        assert.equal(recalc.maturityAmount, 37161);
+        assert.equal(recalc.nonProfitAmountA, 27600);
+        assert.equal(recalc.adjustedPrincipalX, 9000);
+      });
+    });
+
+    // =========================================================================
+    // 7. Multi-Format Document Adapters & Document Categories
+    // =========================================================================
+    describe('7. Multi-Format Document Adapters & Category Verification', () => {
+      test('Excel Adapter identifies Personal RD Ledger and normalizes transaction structure', async () => {
+        const rows: any[][] = [
+          ['CUSTOMER PERSONAL LEDGER', '', '', '', ''],
+          ['Customer Name:', 'ANITA KUMARI', 'A/c No:', '882190', ''],
+          ['A/c Opening Date:', '01/01/2025', 'Maturity Date:', '01/01/2026', ''],
+          ['Period:', '365 DAYS', 'Interest Rate:', '12.00%', ''],
+          ['Scheme Name:', 'DRD 100', 'Status:', 'ACTIVE', ''],
+          ['', '', '', '', ''],
+          ['DATE', 'PARTICULARS', 'RECEIPT / CREDIT', 'PAYMENT / DEBIT', 'BALANCE'],
+          ['01/01/2025', 'INSTALLMENT 1', 400, '', 400],
+          ['15/01/2025', 'INSTALLMENT 2', 600, '', 1000],
+        ];
+
+        const wb = XLSX.utils.book_new();
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        XLSX.utils.book_append_sheet(wb, ws, 'Ledger');
+        const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+        const file = new File([buf], 'ANITA_PERSONAL_LEDGER.xlsx', {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        });
+
+        assert.equal(excelAdapter.canHandle(file), true);
+        const parsed = await excelAdapter.parse(file);
+
+        assert.equal(parsed.documentFormat, 'Excel');
+        assert.equal(parsed.documentCategory, 'Personal RD Ledger');
+        assert.equal(parsed.customerName, 'ANITA KUMARI');
+        assert.equal(parsed.totalDeposited, 1000);
+        assert.equal(parsed.transactions.length, 2);
+        assert.equal(parsed.transactions[0].rowPageRef, 'Row #8');
+        assert.equal(parsed.transactions[0].validationStatus, 'Valid');
+        assert.equal(parsed.transactions[0].originalValues?.receiptCredit, 400);
+      });
+
+      test('Excel Adapter identifies Branch Day Sheet and supports customer selection', async () => {
+        const headers = [
+          'SL NO',
+          'BRANCH',
+          'DATE',
+          'BOND NO',
+          'MEM ID',
+          'CUSTOMER NAME',
+          'SCHEME NAME & PLAN',
+          'AMOUNT',
+          'NATURE OF RECEIPT',
+        ];
+
+        const rows: any[][] = [
+          ['XYZ COOPERATIVE CREDIT SOCIETY', '', '', '', '', '', '', '', ''],
+          ['DAY SHEET REPORT', '', '', '', '', '', '', '', ''],
+          headers,
+          [1, 'MAIN', '01/01/2025', '38091068', 'MEM-101', 'SOJAN SUNNY', 'RCD 1YR RRN', 15600, 'COLLECTION'],
+          [2, 'MAIN', '15/10/2025', '38091068', 'MEM-101', 'SOJAN SUNNY', 'RCD 1YR RRN', 1000, 'COLLECTION'],
+          [3, 'MAIN', '01/01/2025', '77665544', 'MEM-202', 'VIJAY KUMAR', 'RCD 1YR RRN', 5000, 'COLLECTION'],
+        ];
+
+        const wb = XLSX.utils.book_new();
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        XLSX.utils.book_append_sheet(wb, ws, 'DaySheet');
+        const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+        const file = new File([buf], 'BRANCH_DAY_SHEET.xlsx', {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        });
+
+        const parsed = await excelAdapter.parse(file);
+
+        assert.equal(parsed.documentFormat, 'Excel');
+        assert.equal(parsed.documentCategory, 'Branch Day Sheet');
+        assert.equal(parsed.isDaySheet, true);
+        assert.equal(parsed.daySheetCustomers?.length, 2);
+      });
+
+      test('Process Multi-Format Document routes correctly and rejects unsupported formats', async () => {
+        const fakeTxt = new File(['hello'], 'document.txt', { type: 'text/plain' });
+        await assert.rejects(
+          async () => {
+            await processMultiFormatDocument(fakeTxt);
+          },
+          {
+            name: 'RDValidationError',
+            message: /Please upload a supported RD document file/i,
+          }
+        );
+      });
+
+      test('Manual contractual daily installment override is strictly enforced (₹200/day test)', () => {
+        // Test that when a contractual daily installment of ₹200 is supplied,
+        // required 90-day amount = 200 * 90 = ₹18,000 (NOT replaced by inferred ₹100).
+        const dummyTxns: LedgerTransactionRow[] = [
+          {
+            rowNum: 1,
+            date: '01/01/2025',
+            depositDateObj: new Date(2025, 0, 1),
+            particulars: 'RCD 1YR RRN',
+            receiptCredit: 20000,
+            rawReceiptCredit: 20000,
+            isSummaryRow: false,
+            isValidPayment: true,
+          },
+          {
+            rowNum: 2,
+            date: '15/11/2025', // inside final 90 days of 01/01/2026
+            depositDateObj: new Date(2025, 10, 15),
+            particulars: 'RCD 1YR RRN',
+            receiptCredit: 25000,
+            rawReceiptCredit: 25000,
+            isSummaryRow: false,
+            isValidPayment: true,
+          },
+        ];
+
+        // Total deposits: ₹45,000.
+        // Final 90-day deposits: ₹25,000.
+        // Supplied contractual installment: ₹200.
+        // Required 90-day amount = 200 * 90 = ₹18,000.
+        // A = 25,000 - 18,000 = ₹7,000.
+        // X = 45,000 - 7,000 = ₹38,000.
+        const res = calculateDailyRDNonProfitMaturity(
+          dummyTxns,
+          45000,
+          200, // Explicitly supplied ₹200 contractual installment
+          12.0,
+          365,
+          new Date(2025, 0, 1),
+          new Date(2026, 0, 1)
+        );
+
+        assert.equal(res.dailySchemeAmount, 200);
+        assert.equal(res.required90DayAmount, 18000);
+        assert.equal(res.actualFinal90DayDeposits, 25000);
+        assert.equal(res.nonProfitAmountA, 7000);
+        assert.equal(res.adjustedPrincipalX, 38000);
       });
     });
   });
