@@ -6,6 +6,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
+import * as XLSX from 'xlsx';
 import {
   calculateDailyRDMaturity,
   calculateMonthlyRDMaturity,
@@ -30,7 +31,19 @@ import {
   createNitcMonthlyRCMAccountData,
   createDepositPersonalLedgerRDAccountData,
 } from '../src/utils/demoLedger';
-import type { RDAccountData } from '../src/types';
+import {
+  parseRDLedgerWorkbook,
+  detectDaySheetHeader,
+  parseDaySheetRows,
+  selectDaySheetCustomer,
+  calculateDailyRDNonProfitMaturity,
+  determineDailyInstallment,
+  roundMaturityY,
+  RDValidationError,
+  isCollectionTransaction,
+  getTransactionDate,
+} from '../src/utils/excelParser';
+import type { RDAccountData, LedgerTransactionRow } from '../src/types';
 
 describe('RD Calculation & Interest-Rate Controls Test Suite', () => {
   // =========================================================================
@@ -730,4 +743,1302 @@ describe('RD Calculation & Interest-Rate Controls Test Suite', () => {
       );
     });
   });
+
+  // =========================================================================
+  // 6. Branch Day Sheet Workbook Format & Daily RD Non-Profit 90-Day Rule
+  // =========================================================================
+  describe('6. Branch Day Sheet Workbook Parsing & Daily RD Non-Profit Rules', () => {
+    // Helper to generate a mock Day Sheet ArrayBuffer with SheetJS
+    function createMockDaySheetWorkbook(): ArrayBuffer {
+      const wb = XLSX.utils.book_new();
+
+      // Summary sheet 1: TOTAL BUSINESS (contains broken formula / summary)
+      const wsTotalBusiness = XLSX.utils.aoa_to_sheet([
+        ['TOTAL BUSINESS SUMMARY'],
+        ['TOTAL COLLECTIONS', '#REF!'],
+      ]);
+      XLSX.utils.book_append_sheet(wb, wsTotalBusiness, 'TOTAL BUSINESS');
+
+      // Summary sheet 2: AGENT REPORT
+      const wsAgentReport = XLSX.utils.aoa_to_sheet([
+        ['AGENT REPORT'],
+        ['TOTAL COMMISSIONS', '#REF!'],
+      ]);
+      XLSX.utils.book_append_sheet(wb, wsAgentReport, 'AGENT REPORT');
+
+      // Main transaction worksheet: Sheet2
+      // Row 1: Org heading
+      // Row 2: Day Sheet title
+      // Row 3: Headers
+      // Row 4 onward: Transactions
+      const sheet2Rows: any[][] = [
+        ['ABC URBAN NIDHI LIMITED - KOCHI BRANCH'],
+        ['BRANCH DAY SHEET REPORT'],
+        ['DATE', 'MEMBERSHIP ID', 'CUSTOMER NAME', 'NEW/BOND NO', 'SCHEME NAME & PLAN', 'AMOUNT', 'NATURE OF RECEIPT'],
+      ];
+
+      // Add 200 daily deposits of ₹100 for SOJAN SUNNY starting 01/01/2025
+      const baseDate = new Date(2025, 0, 1);
+      for (let i = 0; i < 200; i++) {
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + i);
+        const dayStr = `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+        sheet2Rows.push([
+          dayStr,
+          'M-10293',
+          'SOJAN SUNNY',
+          'BOND-8821',
+          'DAILY RD - 365 DAYS',
+          100,
+          'DAILY RD RECEIPT',
+        ]);
+      }
+
+      // Add a non-RD entry that should be discarded (e.g. loan repayment)
+      sheet2Rows.push([
+        '15/05/2025',
+        'M-10293',
+        'SOJAN SUNNY',
+        'BOND-8821',
+        'LOAN ACCOUNT',
+        5000,
+        'LOAN RECOVERY',
+      ]);
+
+      // Add records for another customer (ANIL KUMAR) in the same Day Sheet
+      for (let i = 0; i < 50; i++) {
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + i);
+        const dayStr = `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+        sheet2Rows.push([
+          dayStr,
+          'M-55102',
+          'ANIL KUMAR',
+          'BOND-9900',
+          'DRD 200',
+          200,
+          'COLLECTION',
+        ]);
+      }
+
+      const wsSheet2 = XLSX.utils.aoa_to_sheet(sheet2Rows);
+      XLSX.utils.book_append_sheet(wb, wsSheet2, 'Sheet2');
+
+      const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+      return buf;
+    }
+
+    test('Header detection: detectDaySheetHeader recognizes normalized column headers in Day Sheet', () => {
+      const headers = ['DATE', 'MEMBERSHIP ID', 'CUSTOMER NAME', 'NEW/BOND NO', 'SCHEME NAME & PLAN', 'AMOUNT', 'NATURE OF RECEIPT'];
+      const cols = detectDaySheetHeader(headers);
+      assert.ok(cols);
+      assert.equal(cols?.dateCol, 0);
+      assert.equal(cols?.membershipIdCol, 1);
+      assert.equal(cols?.customerNameCol, 2);
+      assert.equal(cols?.bondNoCol, 3);
+      assert.equal(cols?.schemeCol, 4);
+      assert.equal(cols?.amountCol, 5);
+      assert.equal(cols?.natureCol, 6);
+    });
+
+    test('Workbook parser supports Day Sheet format and ignores summary sheets with #REF!', () => {
+      const data = createMockDaySheetWorkbook();
+      const parsed = parseRDLedgerWorkbook(data, 'SOJAN SUNNY(2).xlsx', data.byteLength);
+
+      assert.equal(parsed.rdType, 'Daily RD');
+      assert.equal(parsed.customerName, 'SOJAN SUNNY');
+      assert.equal(parsed.accountNumber, 'BOND-8821');
+      assert.equal(parsed.sheetName, 'Sheet2');
+      assert.equal(parsed.isDaySheet, true);
+
+      // Verify non-RD transaction was discarded and only the 200 RD deposits of ₹100 are counted
+      assert.equal(parsed.validTransactionCount, 200);
+      assert.equal(parsed.totalDeposited, 20000.0);
+      assert.equal(parsed.dailySchemeAmount, 100);
+
+      // Multi-customer detection
+      assert.ok(parsed.daySheetCustomers);
+      assert.equal(parsed.daySheetCustomers?.length, 2);
+      const customerNames = parsed.daySheetCustomers?.map((c) => c.customerName);
+      assert.ok(customerNames?.includes('SOJAN SUNNY'));
+      assert.ok(customerNames?.includes('ANIL KUMAR'));
+    });
+
+    test('Customer isolation & switching: filters records per selected customer', () => {
+      const data = createMockDaySheetWorkbook();
+      const parsed = parseRDLedgerWorkbook(data, 'SOJAN SUNNY(2).xlsx', data.byteLength);
+
+      // Switch to ANIL KUMAR
+      const anilData = selectDaySheetCustomer(parsed, 'ANIL KUMAR');
+      assert.equal(anilData.customerName, 'ANIL KUMAR');
+      assert.equal(anilData.accountNumber, 'BOND-9900');
+      assert.equal(anilData.validTransactionCount, 50);
+      assert.equal(anilData.totalDeposited, 10000.0);
+      assert.equal(anilData.dailySchemeAmount, 200);
+    });
+
+    test('Daily RD non-profit 90-day calculation: excess deposits in final 90 days create non-profit amount A', () => {
+      // 1. First installment on 01/01/2025.
+      // 2. Tenure = 365 days -> Maturity Date = 01/01/2026.
+      // 3. Final 90-day window starts at maturityDate - 89 days.
+      // 4. Daily installment = ₹100.
+      // 5. Required final-90-day amount = 100 * 90 = ₹9,000.
+      // Customer deposited 200 installments of ₹100 before final 90 days (₹20,000)
+      // and deposited ₹12,000 inside final 90 days (120 deposits of ₹100).
+      // Total actual deposits = 20,000 + 12,000 = ₹32,000.
+      // Actual in final 90 days = ₹12,000.
+      // Excess in final 90 days A = 12,000 - 9,000 = ₹3,000 (Non-Profit).
+      // Profit-eligible principal X = 32,000 - 3,000 = ₹29,000.
+      const txns: any[] = [];
+      const baseDate = new Date(2025, 0, 1);
+      const maturityDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + 365);
+      const periodStart = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 89);
+
+      // 200 deposits before final 90 days (days 0..199)
+      for (let i = 0; i < 200; i++) {
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + i);
+        txns.push({
+          rowNum: i + 1,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+
+      // 120 deposits inside final 90 days (all within final 90 days)
+      for (let i = 0; i < 120; i++) {
+        const dayOffset = Math.min(i % 89, 89);
+        const d = new Date(periodStart.getFullYear(), periodStart.getMonth(), periodStart.getDate() + dayOffset);
+        txns.push({
+          rowNum: 201 + i,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+
+      const totalDeposited = txns.reduce((sum, t) => sum + t.receiptCredit, 0);
+      assert.equal(totalDeposited, 32000);
+
+      const res = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 100, 12.0, 365);
+      assert.equal(res.dailySchemeAmount, 100);
+      assert.equal(res.actualFinal90DayDeposits, 12000);
+      assert.equal(res.required90DayAmount, 9000);
+      assert.equal(res.nonProfitAmount, 3000);
+      assert.equal(res.profitEligibleAmount, 29000);
+      assert.equal(roundMoney(res.profitEligibleAmount + res.nonProfitAmount), totalDeposited);
+
+      // Verify interest Y calculated on X using company Excel formula and final rounding
+      const expectedCalc = calculateDailyRDMaturity(365, res.profitEligibleAmount / 365, 12.0);
+      const expectedRawY = expectedCalc.rawMaturityAmount || 0;
+      const expectedRoundedY = roundMaturityY(expectedRawY);
+      assert.equal(res.calculationResultY, roundMoney(expectedRawY));
+      assert.equal(res.roundedY, expectedRoundedY);
+      assert.equal(res.maturityAmount, roundMoney(expectedRoundedY + res.nonProfitAmount));
+    });
+
+    test('User Validation Example: ₹100/day, 365d, Total ₹36,500, Final-90d ₹16,000 -> A ₹7,000, X ₹29,500, Y ₹31,337.55, Rounded Y ₹31,338, Maturity ₹38,338', () => {
+      // Step 1: First installment date 01/01/2025 -> maturity date 01/01/2026 (+365 days)
+      // Step 2: Final 90-day period ending on maturity date (04/10/2025 to 01/01/2026 inclusive)
+      // Step 3: Required Amount = 100 * 90 = 9000
+      // Step 4: Actual deposits in final 90 days = 16000 -> A = MAX(0, 16000 - 9000) = 7000
+      // Step 5: X = 36500 - 7000 = 29500
+      // Step 6: Y = 31337.55
+      // Step 7: Rounded Y = 31338
+      // Step 8: Final Maturity Amount = 31338 + 7000 = 38338
+      const baseDate = new Date(2025, 0, 1);
+      const maturityDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + 365);
+      const periodStart = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 89);
+
+      const txns: any[] = [];
+      // 205 deposits of ₹100 before the final 90 days = ₹20,500
+      for (let i = 0; i < 205; i++) {
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + i);
+        txns.push({
+          rowNum: i + 1,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+
+      // Deposits totaling ₹16,000 during the final 90 days (160 deposits of ₹100)
+      for (let i = 0; i < 160; i++) {
+        const dayOffset = Math.min(i % 89, 89);
+        const d = new Date(periodStart.getFullYear(), periodStart.getMonth(), periodStart.getDate() + dayOffset);
+        txns.push({
+          rowNum: 206 + i,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+
+      const totalDeposited = txns.reduce((sum, t) => sum + t.receiptCredit, 0);
+      assert.equal(totalDeposited, 36500);
+
+      const res = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 100, 12.0, 365);
+      assert.equal(res.normalizedDailyAmount, 100);
+      assert.equal(res.required90DayAmount, 9000);
+      assert.equal(res.actualFinal90DayDeposits, 16000);
+      assert.equal(res.nonProfitAmount, 7000);
+      assert.equal(res.profitEligibleAmount, 29500);
+      assert.equal(res.calculationResultY, 31337.55);
+      assert.equal(res.roundedY, 31338);
+      assert.equal(res.maturityAmount, 38338);
+      assert.equal(res.totalInterest, 1838);
+
+      // Verify transparent dailyRDAdjustment breakdown structure
+      assert.equal(res.dailyRDAdjustment.totalActualDeposits, 36500);
+      assert.equal(res.dailyRDAdjustment.actualFinal90DayDeposits, 16000);
+      assert.equal(res.dailyRDAdjustment.required90DayAmount, 9000);
+      assert.equal(res.dailyRDAdjustment.nonProfitAmountA, 7000);
+      assert.equal(res.dailyRDAdjustment.adjustedPrincipalX, 29500);
+      assert.equal(res.dailyRDAdjustment.calculationResultY, 31337.55);
+      assert.equal(res.dailyRDAdjustment.roundedY, 31338);
+      assert.equal(res.dailyRDAdjustment.finalMaturityAmount, 38338);
+
+      // Verify recalculateRDWithRate preserves the exact calculation
+      const account: RDAccountData = {
+        fileName: 'test_validation.xlsx',
+        fileSize: 1000,
+        sheetName: 'Sheet1',
+        customerName: 'Validation Customer',
+        accountNumber: 'BOND-100',
+        rdType: 'Daily RD',
+        annualRate: 0.12,
+        tenureDays: 365,
+        totalDeposited: 36500,
+        dailySchemeAmount: 100,
+        profitEligibleAmount: 29500,
+        nonProfitAmount: 7000,
+        normalizedDailyAmount: 100,
+        totalInterest: 1838,
+        maturityAmount: 38338,
+        validTransactionCount: txns.length,
+        hasSummaryRow: false,
+        transactions: txns,
+      };
+
+      const recalc = recalculateRDWithRate(account, 12.0);
+      assert.equal(recalc.nonProfitAmount, 7000);
+      assert.equal(recalc.profitEligibleAmount, 29500);
+      assert.equal(recalc.calculationResultY, 31337.55);
+      assert.equal(recalc.roundedY, 31338);
+      assert.equal(recalc.maturityAmount, 38338);
+      assert.equal(recalc.totalInterest, 1838);
+    });
+
+    // =========================================================================
+    // Issue 4 Required Regression Tests (Scenarios 1-8)
+    // =========================================================================
+    test('Regression 1: Final 90-day deposits below required amount (A = 0, X = totalDepositsDuringPeriod)', () => {
+      // Base installment: ₹100, tenure 365 days
+      // Required 90-day amount = 100 * 90 = ₹9,000
+      // 275 deposits of ₹100 prior to 90-day window = ₹27,500
+      // 50 deposits of ₹100 inside 90-day window = ₹5,000 < ₹9,000
+      // Total deposits = ₹32,500
+      // actualFinal90DayDeposits = ₹5,000
+      // A = Math.max(0, 5000 - 9000) = 0
+      // X = 32,500 - 0 = 32,500
+      const baseDate = new Date(2025, 0, 1);
+      const maturityDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + 365);
+      const periodStart = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 89);
+
+      const txns: LedgerTransactionRow[] = [];
+      for (let i = 0; i < 275; i++) {
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + i);
+        txns.push({
+          rowNum: i + 1,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+      for (let i = 0; i < 50; i++) {
+        const d = new Date(periodStart.getFullYear(), periodStart.getMonth(), periodStart.getDate() + i);
+        txns.push({
+          rowNum: 276 + i,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+
+      const totalDeposited = txns.reduce((sum, t) => sum + (t.receiptCredit || 0), 0);
+      assert.equal(totalDeposited, 32500);
+
+      const res = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 100, 12.0, 365);
+      assert.equal(res.actualFinal90DayDeposits, 5000);
+      assert.equal(res.required90DayAmount, 9000);
+      assert.equal(res.nonProfitAmount, 0); // A = 0
+      assert.equal(res.profitEligibleAmount, 32500); // X = totalDepositsDuringPeriod
+      assert.equal(res.depositsDuringRDPeriod, 32500);
+      assert.equal(res.postMaturityDeposits, 0);
+    });
+
+    test('Regression 2: Final 90-day deposits equal to required amount (A = 0, X = totalDepositsDuringPeriod)', () => {
+      // Required 90-day amount = 100 * 90 = ₹9,000
+      // 275 deposits of ₹100 prior to 90-day window = ₹27,500
+      // 90 deposits of ₹100 inside 90-day window = ₹9,000 = required
+      // Total deposits = ₹36,500
+      // actualFinal90DayDeposits = ₹9,000
+      // A = Math.max(0, 9000 - 9000) = 0
+      // X = 36,500 - 0 = 36,500
+      const baseDate = new Date(2025, 0, 1);
+      const maturityDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + 365);
+      const periodStart = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 89);
+
+      const txns: LedgerTransactionRow[] = [];
+      for (let i = 0; i < 275; i++) {
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + i);
+        txns.push({
+          rowNum: i + 1,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+      for (let i = 0; i < 90; i++) {
+        const d = new Date(periodStart.getFullYear(), periodStart.getMonth(), periodStart.getDate() + i);
+        txns.push({
+          rowNum: 276 + i,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+
+      const totalDeposited = txns.reduce((sum, t) => sum + (t.receiptCredit || 0), 0);
+      assert.equal(totalDeposited, 36500);
+
+      const res = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 100, 12.0, 365);
+      assert.equal(res.actualFinal90DayDeposits, 9000);
+      assert.equal(res.required90DayAmount, 9000);
+      assert.equal(res.nonProfitAmount, 0); // A = 0
+      assert.equal(res.profitEligibleAmount, 36500); // X = totalDepositsDuringPeriod
+      assert.equal(res.depositsDuringRDPeriod, 36500);
+      assert.equal(res.maturityAmount, 38774); // roundedY(38773.57) + 0 = 38774
+    });
+
+    test('Regression 3: Final 90-day deposits above required amount (A = actual - required > 0, X = total - A)', () => {
+      // Required 90-day amount = 100 * 90 = ₹9,000
+      // 200 deposits before final 90 days = ₹20,000
+      // 140 deposits of ₹100 inside final 90 days = ₹14,000 > ₹9,000
+      // Total deposits = ₹34,000
+      // actualFinal90DayDeposits = ₹14,000
+      // A = Math.max(0, 14000 - 9000) = ₹5,000
+      // X = 34,000 - 5,000 = ₹29,000
+      const baseDate = new Date(2025, 0, 1);
+      const maturityDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + 365);
+      const periodStart = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 89);
+
+      const txns: LedgerTransactionRow[] = [];
+      for (let i = 0; i < 200; i++) {
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + i);
+        txns.push({
+          rowNum: i + 1,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+      for (let i = 0; i < 140; i++) {
+        const dayOffset = Math.min(i % 89, 89);
+        const d = new Date(periodStart.getFullYear(), periodStart.getMonth(), periodStart.getDate() + dayOffset);
+        txns.push({
+          rowNum: 201 + i,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+
+      const totalDeposited = txns.reduce((sum, t) => sum + (t.receiptCredit || 0), 0);
+      assert.equal(totalDeposited, 34000);
+
+      const res = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 100, 12.0, 365);
+      assert.equal(res.actualFinal90DayDeposits, 14000);
+      assert.equal(res.required90DayAmount, 9000);
+      assert.equal(res.nonProfitAmount, 5000); // A = 14000 - 9000 = 5000
+      assert.equal(res.profitEligibleAmount, 29000); // X = 34000 - 5000 = 29000
+      assert.equal(res.depositsDuringRDPeriod, 34000);
+      assert.equal(roundMoney(res.profitEligibleAmount + res.nonProfitAmount), 34000);
+    });
+
+    test('Regression 4: Post-maturity deposits tracked separately, excluded from A and excluded from X', () => {
+      // Customer makes deposits before final 90 days, inside final 90 days, and after maturity date.
+      // Base: ₹100/day. Required: ₹9,000.
+      // 100 deposits of ₹100 prior to final 90 days = ₹10,000
+      // 90 deposits of ₹100 inside final 90 days = ₹9,000
+      // 3 post-maturity deposits of ₹500 = ₹1,500 (dated 5, 10, 15 days after maturity date)
+      // Total deposited = ₹20,500
+      // Deposits during RD period = ₹19,000
+      // Post-maturity deposits = ₹1,500
+      // actualFinal90DayDeposits = ₹9,000 (does not include post-maturity deposits!)
+      // A = Math.max(0, 9000 - 9000) = 0 (post-maturity deposits are NOT added to A!)
+      // X = depositsDuringRDPeriod - A = 19,000 - 0 = ₹19,000
+      const baseDate = new Date(2025, 0, 1);
+      const maturityDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + 365);
+      const periodStart = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 89);
+
+      const txns: LedgerTransactionRow[] = [];
+      for (let i = 0; i < 100; i++) {
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + i);
+        txns.push({
+          rowNum: i + 1,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD Regular',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+      for (let i = 0; i < 90; i++) {
+        const d = new Date(periodStart.getFullYear(), periodStart.getMonth(), periodStart.getDate() + i);
+        txns.push({
+          rowNum: 101 + i,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD Final 90',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+      // Post-maturity deposits
+      for (let i = 1; i <= 3; i++) {
+        const d = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() + (i * 5));
+        txns.push({
+          rowNum: 191 + i,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Post-maturity deposit',
+          receiptCredit: 500,
+          rawReceiptCredit: 500,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+
+      const totalDeposited = txns.reduce((sum, t) => sum + (t.receiptCredit || 0), 0);
+      assert.equal(totalDeposited, 20500);
+
+      const res = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 100, 12.0, 365);
+      assert.equal(res.actualFinal90DayDeposits, 9000);
+      assert.equal(res.required90DayAmount, 9000);
+      assert.equal(res.postMaturityDeposits, 1500); // Tracked separately
+      assert.equal(res.nonProfitAmount, 0); // Strictly A = max(0, 9000 - 9000) = 0
+      assert.equal(res.depositsDuringRDPeriod, 19000);
+      assert.equal(res.profitEligibleAmount, 19000); // X excluded post-maturity deposits
+    });
+
+    test('Regression 5: Multiple payments on the same date aggregated into final 90-day deposits', () => {
+      // All eligible customer deposits on the same date within the 90-day window are aggregated toward actualFinal90DayDeposits
+      const baseDate = new Date(2025, 0, 1);
+      const maturityDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + 365);
+      const periodStart = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 89);
+
+      const txns: LedgerTransactionRow[] = [];
+      for (let i = 0; i < 100; i++) {
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + i);
+        txns.push({
+          rowNum: i + 1,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+
+      // Inside final 90 days: 3 distinct payments on the exact same date
+      const sameDay = new Date(periodStart.getFullYear(), periodStart.getMonth(), periodStart.getDate() + 10);
+      txns.push({
+        rowNum: 101,
+        date: `${sameDay.getDate()}/${sameDay.getMonth() + 1}/${sameDay.getFullYear()}`,
+        depositDateObj: sameDay,
+        particulars: 'Payment 1',
+        receiptCredit: 500,
+        rawReceiptCredit: 500,
+        isValidPayment: true,
+        isSummaryRow: false,
+      });
+      txns.push({
+        rowNum: 102,
+        date: `${sameDay.getDate()}/${sameDay.getMonth() + 1}/${sameDay.getFullYear()}`,
+        depositDateObj: sameDay,
+        particulars: 'Payment 2',
+        receiptCredit: 1000,
+        rawReceiptCredit: 1000,
+        isValidPayment: true,
+        isSummaryRow: false,
+      });
+      txns.push({
+        rowNum: 103,
+        date: `${sameDay.getDate()}/${sameDay.getMonth() + 1}/${sameDay.getFullYear()}`,
+        depositDateObj: sameDay,
+        particulars: 'Payment 3',
+        receiptCredit: 1500,
+        rawReceiptCredit: 1500,
+        isValidPayment: true,
+        isSummaryRow: false,
+      });
+
+      const totalDeposited = txns.reduce((sum, t) => sum + (t.receiptCredit || 0), 0);
+      assert.equal(totalDeposited, 13000);
+
+      const res = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 100, 12.0, 365);
+      // All 3 payments on same day aggregated: 500 + 1000 + 1500 = 3000
+      assert.equal(res.actualFinal90DayDeposits, 3000);
+      assert.equal(res.required90DayAmount, 9000);
+      assert.equal(res.nonProfitAmount, 0); // 3000 <= 9000
+    });
+
+    test('Regression 6: Combined and irregular deposits: determineDailyInstallment correctly identifies base installment', () => {
+      // Customer makes combined deposits (e.g. ₹500, ₹1000, ₹2000).
+      // Test A: Explicit configured scheme installment amount takes priority
+      const txnsCombined: LedgerTransactionRow[] = [
+        {
+          rowNum: 1,
+          date: '01/01/2025',
+          depositDateObj: new Date(2025, 0, 1),
+          particulars: 'RD Collection',
+          receiptCredit: 500,
+          rawReceiptCredit: 500,
+          isValidPayment: true,
+          isSummaryRow: false,
+        },
+        {
+          rowNum: 2,
+          date: '10/01/2025',
+          depositDateObj: new Date(2025, 0, 10),
+          particulars: 'RD Collection',
+          receiptCredit: 1000,
+          rawReceiptCredit: 1000,
+          isValidPayment: true,
+          isSummaryRow: false,
+        },
+        {
+          rowNum: 3,
+          date: '20/01/2025',
+          depositDateObj: new Date(2025, 0, 20),
+          particulars: 'RD Collection',
+          receiptCredit: 500,
+          rawReceiptCredit: 500,
+          isValidPayment: true,
+          isSummaryRow: false,
+        },
+      ];
+
+      // When configuredSchemeAmount is passed (e.g. 100), prioritize it over the mode (500)
+      const detectedConfigured = determineDailyInstallment(txnsCombined, 2000, 365, 100);
+      assert.equal(detectedConfigured, 100);
+
+      // Test B: When particulars mention installment count (e.g. "₹500 - 5 installments", "₹1,000 - 10 installments")
+      const txnsWithCount: LedgerTransactionRow[] = [
+        {
+          rowNum: 1,
+          date: '01/01/2025',
+          depositDateObj: new Date(2025, 0, 1),
+          particulars: '₹500 - 5 installments',
+          receiptCredit: 500,
+          rawReceiptCredit: 500,
+          isValidPayment: true,
+          isSummaryRow: false,
+        },
+        {
+          rowNum: 2,
+          date: '10/01/2025',
+          depositDateObj: new Date(2025, 0, 10),
+          particulars: '₹1,000 - 10 installments',
+          receiptCredit: 1000,
+          rawReceiptCredit: 1000,
+          isValidPayment: true,
+          isSummaryRow: false,
+        },
+      ];
+      const detectedCount = determineDailyInstallment(txnsWithCount, 1500, 365);
+      assert.equal(detectedCount, 100);
+
+      // Test C: When particulars contain DRD 100
+      const txnsDRD: LedgerTransactionRow[] = [
+        {
+          rowNum: 1,
+          date: '01/01/2025',
+          depositDateObj: new Date(2025, 0, 1),
+          particulars: 'DRD 100 combined payment',
+          receiptCredit: 1000,
+          rawReceiptCredit: 1000,
+          isValidPayment: true,
+          isSummaryRow: false,
+        },
+      ];
+      const detectedDRD = determineDailyInstallment(txnsDRD, 1000, 365);
+      assert.equal(detectedDRD, 100);
+
+      // Verify that with base installment ₹100, required 90-day amount is 100 * 90 = 9000, not 500 * 90 = 45000!
+      const res = calculateDailyRDNonProfitMaturity(txnsWithCount, 1500, detectedCount, 12.0, 365);
+      assert.equal(res.normalizedDailyAmount, 100);
+      assert.equal(res.required90DayAmount, 9000);
+    });
+
+    test('Regression 7: Skipped installments do NOT shift maturity date or 90-day window', () => {
+      // First installment on 01/01/2025
+      const firstDate = new Date(2025, 0, 1);
+      const expectedMaturityDate = new Date(2025, 0, 1 + 365); // 01/01/2026
+      const expectedPeriodStart = new Date(expectedMaturityDate.getFullYear(), expectedMaturityDate.getMonth(), expectedMaturityDate.getDate() - 89);
+
+      const txns: LedgerTransactionRow[] = [];
+      // Day 1 deposit
+      txns.push({
+        rowNum: 1,
+        date: '01/01/2025',
+        depositDateObj: firstDate,
+        particulars: 'Daily RD',
+        receiptCredit: 100,
+        rawReceiptCredit: 100,
+        isValidPayment: true,
+        isSummaryRow: false,
+      });
+
+      // Customer skips 60 days (no payments from day 2 to day 61)
+      // Resumes on day 62 (04/03/2025)
+      for (let i = 62; i < 200; i++) {
+        const d = new Date(firstDate.getFullYear(), firstDate.getMonth(), firstDate.getDate() + i);
+        txns.push({
+          rowNum: txns.length + 1,
+          date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+          depositDateObj: d,
+          particulars: 'Daily RD',
+          receiptCredit: 100,
+          rawReceiptCredit: 100,
+          isValidPayment: true,
+          isSummaryRow: false,
+        });
+      }
+
+      const totalDeposited = txns.reduce((sum, t) => sum + (t.receiptCredit || 0), 0);
+      const res = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 100, 12.0, 365);
+
+      // Verify maturity date remains strictly firstInstallmentDate + 365 days
+      assert.equal(res.maturityDateObj.getTime(), expectedMaturityDate.getTime());
+      assert.equal(res.periodStartObj.getTime(), expectedPeriodStart.getTime());
+    });
+
+    test('Regression 8: Monthly RD calculation remains strictly unchanged and accurate', () => {
+      // Monthly RD standard test case: ₹2,000 monthly, 12 months, 12% p.a.
+      // Expected maturity: ₹25,618.65608665788 -> ₹25,618.66
+      // Expected interest: ₹1,618.65608665788 -> ₹1,618.66
+      const monthlyRes = calculateMonthlyRDMaturity(12, 2000, 12.0);
+      assert.equal(monthlyRes.isValid, true);
+      assert.equal(monthlyRes.rawMaturityAmount, 25618.65608665788);
+      assert.equal(monthlyRes.maturityAmount, 25618.66);
+      assert.equal(monthlyRes.totalDeposited, 24000.0);
+      assert.equal(monthlyRes.totalInterest, 1618.66);
+
+      // Verify DepositPersonalLedgerRD ledger calculation remains intact
+      const accountData = createDepositPersonalLedgerRDAccountData();
+      const ledgerResult = recalculateRDWithRate(accountData, 12.0);
+      assert.equal(ledgerResult.totalDeposited, 24000.0);
+      assert.equal(ledgerResult.maturityAmount, 25618.66);
+      assert.equal(ledgerResult.totalInterest, 1618.66);
+    });
+
+    test('Informative validation error on invalid workbook format', () => {
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet([
+        ['RANDOM TEXT', 'NO HEADERS HERE'],
+        ['123', '456'],
+      ]);
+      XLSX.utils.book_append_sheet(wb, ws, 'RandomSheet');
+      const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+
+      assert.throws(
+        () => parseRDLedgerWorkbook(buf, 'invalid.xlsx', buf.byteLength),
+        (err: any) => {
+          assert.equal(err.name, 'RDValidationError');
+          assert.ok(err.message.includes('Expected transaction headers'));
+          return true;
+        }
+      );
+    });
+
+    test('Conventional RD Personal Ledger continues to parse without regression', () => {
+      // Create a conventional Personal Ledger workbook
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet([
+        ['Customer Name:', 'RAMESH KUMAR', '', 'Account No:', 'RD-99120'],
+        ['RD Type:', 'Monthly RD', '', 'Period:', '12 Months'],
+        ['Opening Date:', '01/01/2025', '', 'Maturity Date:', '01/01/2026'],
+        ['Date', 'Particulars', 'Payment / Debit', 'Receipt / Credit', 'Balance', 'Int Paid'],
+        ['01/01/2025', 'INSTALLMENT 1', '', 2000, 2000, ''],
+        ['01/02/2025', 'INSTALLMENT 2', '', 2000, 4000, ''],
+        ['01/03/2025', 'INSTALLMENT 3', '', 2000, 6000, ''],
+      ]);
+      XLSX.utils.book_append_sheet(wb, ws, 'DepositPersonalLedgerRD');
+      const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+
+      const parsed = parseRDLedgerWorkbook(buf, 'DepositPersonalLedgerRD.xlsx', buf.byteLength);
+      assert.equal(parsed.customerName, 'RAMESH KUMAR');
+      assert.equal(parsed.accountNumber, 'RD-99120');
+      assert.equal(parsed.rdType, 'Monthly RD');
+      assert.equal(parsed.validTransactionCount, 3);
+      assert.equal(parsed.totalDeposited, 6000);
+    });
+
+    // =========================================================================
+    // DAILY RD FINAL 90-DAY COLLECTION SUM AND NON-PROFIT ADJUSTMENT SUITE
+    // =========================================================================
+    describe('Daily RD Final 90-Day Collection Sum and Non-Profit Adjustment', () => {
+      test('Validation Case: SOJAN SUNNY exact figures (16 collections of ₹1,000 = ₹16,000)', () => {
+        // Customer: SOJAN SUNNY, Bond: 38091068, Daily Installment: ₹100, Rate: 12%, Tenure: 365 days
+        // Start date: 01/01/2025 -> Maturity date: 01/01/2026 (firstDate + 365 days)
+        // Final 90-day window: 03/10/2025 to 01/01/2026 (89 days before maturity through maturity date)
+        const startDate = new Date(2025, 0, 1);
+        const maturityDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 365);
+        const final90DayStart = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 89);
+
+        const txns: LedgerTransactionRow[] = [];
+
+        // 1. Initial deposits before final 90 days totaling ₹20,500 (36,500 - 16,000)
+        // e.g. 205 payments of ₹100 from day 0 to day 204
+        for (let i = 0; i < 205; i++) {
+          const d = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + i);
+          txns.push({
+            rowNum: txns.length + 1,
+            date: `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`,
+            depositDateObj: d,
+            particulars: 'Daily RD Installment',
+            receiptNumber: `REC-PRE-${i + 1}`,
+            receiptCredit: 100,
+            rawReceiptCredit: 100,
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          });
+        }
+
+        // 2. 16 qualifying collection transactions of ₹1,000 each in the final 90-day window = ₹16,000
+        for (let i = 0; i < 16; i++) {
+          // Spread inside final 90 days (between final90DayStart and maturityDate)
+          const d = new Date(final90DayStart.getFullYear(), final90DayStart.getMonth(), final90DayStart.getDate() + (i * 5));
+          assert.ok(d >= final90DayStart && d <= maturityDate, 'Must be within final 90 days');
+          txns.push({
+            rowNum: txns.length + 1,
+            date: `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`,
+            depositDateObj: d,
+            particulars: 'RD COLLECTION DEPOSIT',
+            receiptNumber: `REC-COL-${1000 + i}`,
+            receiptCredit: 1000,
+            rawReceiptCredit: 1000,
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          });
+        }
+
+        const totalDeposited = txns.reduce((sum, t) => sum + (t.receiptCredit || 0), 0);
+        assert.equal(totalDeposited, 36500, 'Total actual deposits must be ₹36,500');
+
+        const result = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 100, 12.0, 365);
+
+        // 1. Total actual deposits = ₹36,500
+        assert.equal(result.totalActualDeposited, 36500);
+
+        // 2. Number of qualifying final 90-day collection transactions = 16
+        assert.equal(result.final90DayCollectionCount, 16);
+
+        // 3. Actual Deposits in Final 90 Days = ₹16,000 (16 * ₹1,000)
+        assert.equal(result.actualFinal90DayDeposits, 16000);
+
+        // 4. Required Amount for Final 90 Days = 100 * 90 = ₹9,000
+        assert.equal(result.required90DayAmount, 9000);
+
+        // 5. Non-Profit Amount (A) = MAX(0, 16000 - 9000) = ₹7,000
+        assert.equal(result.nonProfitAmountA, 7000);
+
+        // 6. Adjusted Principal (X) = 36500 - 7000 = ₹29,500
+        assert.equal(result.adjustedPrincipalX, 29500);
+
+        // 7. Maturity Calculation Result (Y) = ₹31,337.55 (exact raw 31337.546733249837)
+        assert.equal(result.calculationResultY, 31337.55);
+
+        // 8. Rounded Maturity Amount = ₹31,338
+        assert.equal(result.roundedY, 31338);
+
+        // 9. Final Maturity Amount = 31338 + 7000 = ₹38,338
+        assert.equal(result.finalMaturityAmount, 38338);
+      });
+
+      test('Multiple collections on the same date are all summed without dropping any', () => {
+        // Customer has 5 collections of ₹1,000 on the EXACT same date in the final 90 days
+        const startDate = new Date(2025, 0, 1);
+        const maturityDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 365);
+        const sameDayInFinal90 = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 20);
+
+        const txns: LedgerTransactionRow[] = [
+          {
+            rowNum: 1,
+            date: '01/01/2025',
+            depositDateObj: startDate,
+            receiptCredit: 10000,
+            rawReceiptCredit: 10000,
+            isValidPayment: true,
+            isSummaryRow: false,
+            receiptNumber: 'REC-001',
+            particulars: 'Daily RD Opening',
+            type: 'COLLECTION',
+          },
+        ];
+
+        // 5 distinct transactions on the same date
+        for (let i = 1; i <= 5; i++) {
+          txns.push({
+            rowNum: i + 1,
+            date: '12/12/2025',
+            depositDateObj: sameDayInFinal90,
+            receiptCredit: 1000,
+            rawReceiptCredit: 1000,
+            receiptNumber: `SAME-DAY-REC-${i}`,
+            isValidPayment: true,
+            isSummaryRow: false,
+            particulars: `Batch collection payment #${i}`,
+            type: 'COLLECTION',
+          });
+        }
+
+        const totalDeposited = txns.reduce((s, t) => s + (t.receiptCredit || 0), 0); // 15,000
+        const result = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 50, 12.0, 365);
+
+        // All 5 transactions on the same day must be counted!
+        assert.equal(result.final90DayCollectionCount, 5);
+        assert.equal(result.actualFinal90DayDeposits, 5000);
+        // Required = 50 * 90 = 4,500
+        assert.equal(result.required90DayAmount, 4500);
+        // A = 5,000 - 4,500 = 500
+        assert.equal(result.nonProfitAmountA, 500);
+        // X = 15,000 - 500 = 14,500
+        assert.equal(result.adjustedPrincipalX, 14500);
+      });
+
+      test('Multiple collections across different dates are accurately accumulated', () => {
+        const startDate = new Date(2025, 0, 1);
+        const maturityDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 365);
+        const final90DayStart = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 89);
+
+        const txns: LedgerTransactionRow[] = [
+          {
+            rowNum: 1,
+            date: '01/01/2025',
+            depositDateObj: startDate,
+            receiptCredit: 5000,
+            rawReceiptCredit: 5000,
+            receiptNumber: 'REC-OPEN',
+            particulars: 'Daily RD Opening',
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          },
+        ];
+        // 8 collections of ₹2,000 on 8 different days within the final 90 days
+        for (let i = 0; i < 8; i++) {
+          const d = new Date(final90DayStart.getFullYear(), final90DayStart.getMonth(), final90DayStart.getDate() + (i * 10));
+          txns.push({
+            rowNum: txns.length + 1,
+            date: `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`,
+            depositDateObj: d,
+            receiptCredit: 2000,
+            rawReceiptCredit: 2000,
+            receiptNumber: `DIFF-DATE-${i + 1}`,
+            particulars: 'Daily RD Collection',
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          });
+        }
+
+        const totalDeposited = 21000;
+        const result = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 100, 12.0, 365);
+        assert.equal(result.final90DayCollectionCount, 8);
+        assert.equal(result.actualFinal90DayDeposits, 16000);
+        assert.equal(result.required90DayAmount, 9000);
+        assert.equal(result.nonProfitAmountA, 7000);
+      });
+
+      test('Transactions before the 90-day period are excluded from 90-day collection sum', () => {
+        const startDate = new Date(2025, 0, 1);
+        const maturityDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 365);
+        const final90DayStart = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 89);
+
+        // Date 1 day before the final 90-day window
+        const dayBefore90 = new Date(final90DayStart.getFullYear(), final90DayStart.getMonth(), final90DayStart.getDate() - 1);
+
+        const txns: LedgerTransactionRow[] = [
+          {
+            rowNum: 1,
+            date: '01/01/2025',
+            depositDateObj: startDate,
+            receiptCredit: 5000,
+            rawReceiptCredit: 5000,
+            particulars: 'Daily RD Opening',
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          },
+          {
+            rowNum: 2,
+            date: `${dayBefore90.getDate()}/${dayBefore90.getMonth() + 1}/${dayBefore90.getFullYear()}`,
+            depositDateObj: dayBefore90,
+            receiptCredit: 5000,
+            rawReceiptCredit: 5000,
+            particulars: 'Daily RD Early Payment',
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          },
+          {
+            rowNum: 3,
+            date: `${final90DayStart.getDate()}/${final90DayStart.getMonth() + 1}/${final90DayStart.getFullYear()}`,
+            depositDateObj: final90DayStart, // On start date (inclusive)
+            receiptCredit: 2000,
+            rawReceiptCredit: 2000,
+            particulars: 'Daily RD Final 90 Day Payment',
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          },
+        ];
+
+        const totalDeposited = 12000;
+        const result = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 50, 12.0, 365);
+
+        // Only rowNum 3 is within the final 90 days!
+        assert.equal(result.final90DayCollectionCount, 1);
+        assert.equal(result.actualFinal90DayDeposits, 2000);
+        assert.equal(result.totalActualDeposited, 12000);
+      });
+
+      test('Transactions after maturity are excluded from 90-day sum and A, tracked in postMaturityDeposits', () => {
+        const startDate = new Date(2025, 0, 1);
+        const maturityDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 365);
+        const afterMaturityDate = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() + 5);
+
+        const txns: LedgerTransactionRow[] = [
+          {
+            rowNum: 1,
+            date: '01/01/2025',
+            depositDateObj: startDate,
+            receiptCredit: 10000,
+            rawReceiptCredit: 10000,
+            particulars: 'Daily RD Opening',
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          },
+          {
+            rowNum: 2,
+            date: `${maturityDate.getDate()}/${maturityDate.getMonth() + 1}/${maturityDate.getFullYear()}`,
+            depositDateObj: maturityDate, // On maturity date (inclusive)
+            receiptCredit: 3000,
+            rawReceiptCredit: 3000,
+            particulars: 'Daily RD On Maturity Date',
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          },
+          {
+            rowNum: 3,
+            date: `${afterMaturityDate.getDate()}/${afterMaturityDate.getMonth() + 1}/${afterMaturityDate.getFullYear()}`,
+            depositDateObj: afterMaturityDate, // AFTER maturity date
+            receiptCredit: 4000,
+            rawReceiptCredit: 4000,
+            particulars: 'Daily RD After Maturity',
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          },
+        ];
+
+        const totalDeposited = 17000;
+        const result = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 50, 12.0, 365);
+
+        // Only rowNum 2 is in final 90 days
+        assert.equal(result.final90DayCollectionCount, 1);
+        assert.equal(result.actualFinal90DayDeposits, 3000);
+        // Post maturity deposits tracked separately
+        assert.equal(result.postMaturityDeposits, 4000);
+        // Required = 50 * 90 = 4,500. 3,000 <= 4,500 => A = 0
+        assert.equal(result.nonProfitAmountA, 0);
+      });
+
+      test('Non-collection transactions (debit, zero/negative, loans, charges) are excluded from final 90 days', () => {
+        const startDate = new Date(2025, 0, 1);
+        const maturityDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 365);
+        const dateInFinal90 = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 10);
+
+        const openRow: LedgerTransactionRow = {
+          rowNum: 1,
+          date: '01/01/2025',
+          depositDateObj: startDate,
+          receiptCredit: 5000,
+          rawReceiptCredit: 5000,
+          isValidPayment: true,
+          isSummaryRow: false,
+          particulars: 'Daily RD Opening',
+          type: 'COLLECTION',
+        };
+
+        const validCollectionRow: LedgerTransactionRow = {
+          rowNum: 2,
+          date: '01/12/2025',
+          depositDateObj: dateInFinal90,
+          receiptCredit: 1000,
+          rawReceiptCredit: 1000,
+          isValidPayment: true,
+          isSummaryRow: false,
+          particulars: 'Daily RD Collection',
+          type: 'COLLECTION',
+        };
+
+        const debitRow: LedgerTransactionRow = {
+          rowNum: 3,
+          date: '02/12/2025',
+          depositDateObj: dateInFinal90,
+          paymentDebit: 1000,
+          receiptCredit: 0,
+          rawReceiptCredit: 0,
+          isValidPayment: false,
+          isSummaryRow: false,
+          particulars: 'Withdrawal / Debit',
+          type: 'PAYMENT',
+        };
+
+        const loanRow: LedgerTransactionRow = {
+          rowNum: 4,
+          date: '03/12/2025',
+          depositDateObj: dateInFinal90,
+          receiptCredit: 1000,
+          rawReceiptCredit: 1000,
+          isValidPayment: true,
+          isSummaryRow: false,
+          particulars: 'LOAN RECOVERY / CHARGE',
+          type: 'LOAN',
+        };
+
+        assert.equal(isCollectionTransaction(validCollectionRow), true);
+        assert.equal(isCollectionTransaction(debitRow), false);
+        assert.equal(isCollectionTransaction(loanRow), false);
+
+        const txns = [openRow, validCollectionRow, debitRow, loanRow];
+        const result = calculateDailyRDNonProfitMaturity(txns, 6000, 100, 12.0, 365);
+
+        // Only the valid collection row in final 90 days is included
+        assert.equal(result.final90DayCollectionCount, 1);
+        assert.equal(result.actualFinal90DayDeposits, 1000);
+      });
+
+      test('Duplicate transaction prevention prevents identical receipt / row from being counted twice', () => {
+        const startDate = new Date(2025, 0, 1);
+        const maturityDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 365);
+        const dateInFinal90 = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 15);
+
+        const openRow: LedgerTransactionRow = {
+          rowNum: 1,
+          date: '01/01/2025',
+          depositDateObj: startDate,
+          receiptCredit: 5000,
+          rawReceiptCredit: 5000,
+          isValidPayment: true,
+          isSummaryRow: false,
+          particulars: 'Daily RD Opening',
+          type: 'COLLECTION',
+        };
+
+        // Two identical rows with same receipt number in final 90 days
+        const row1: LedgerTransactionRow = {
+          rowNum: 2,
+          date: '10/12/2025',
+          depositDateObj: dateInFinal90,
+          receiptCredit: 1000,
+          rawReceiptCredit: 1000,
+          receiptNumber: 'REC-DUP-999',
+          isValidPayment: true,
+          isSummaryRow: false,
+          particulars: 'Daily RD deposit',
+          type: 'COLLECTION',
+        };
+
+        const duplicateRow: LedgerTransactionRow = {
+          rowNum: 3,
+          date: '10/12/2025',
+          depositDateObj: dateInFinal90,
+          receiptCredit: 1000,
+          rawReceiptCredit: 1000,
+          receiptNumber: 'REC-DUP-999',
+          isValidPayment: true,
+          isSummaryRow: false,
+          particulars: 'Daily RD deposit',
+          type: 'COLLECTION',
+        };
+
+        const result = calculateDailyRDNonProfitMaturity([openRow, row1, duplicateRow], 6000, 100, 12.0, 365);
+
+        // Duplicate is ignored, exactly 1 collection counted in final 90 days
+        assert.equal(result.final90DayCollectionCount, 1);
+        assert.equal(result.actualFinal90DayDeposits, 1000);
+      });
+
+      test('No excess deposits: when actual deposits in final 90 days <= required, A = 0 and X = total deposits', () => {
+        const startDate = new Date(2025, 0, 1);
+        const maturityDate = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + 365);
+        const dateInFinal90 = new Date(maturityDate.getFullYear(), maturityDate.getMonth(), maturityDate.getDate() - 25);
+
+        const txns: LedgerTransactionRow[] = [
+          {
+            rowNum: 1,
+            date: '01/01/2025',
+            depositDateObj: startDate,
+            receiptCredit: 25000,
+            rawReceiptCredit: 25000,
+            particulars: 'Daily RD Opening',
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          },
+          {
+            rowNum: 2,
+            date: '05/12/2025',
+            depositDateObj: dateInFinal90,
+            receiptCredit: 5000,
+            rawReceiptCredit: 5000,
+            particulars: 'Daily RD Payment in Final 90',
+            isValidPayment: true,
+            isSummaryRow: false,
+            type: 'COLLECTION',
+          },
+        ];
+
+        const totalDeposited = 30000;
+        // Daily installment = 100 -> required 90-day = 9,000. Actual in final 90 days = 5,000 <= 9,000
+        const result = calculateDailyRDNonProfitMaturity(txns, totalDeposited, 100, 12.0, 365);
+
+        assert.equal(result.final90DayCollectionCount, 1);
+        assert.equal(result.actualFinal90DayDeposits, 5000);
+        assert.equal(result.required90DayAmount, 9000);
+        assert.equal(result.nonProfitAmountA, 0);
+        assert.equal(result.adjustedPrincipalX, 30000);
+        assert.equal(result.finalMaturityAmount, result.roundedY);
+      });
+
+      test('Excel Day Sheet parsing: unifies customer rows across bond number so all 16 collections are captured', () => {
+        // Construct a Sheet2 table matching SOJAN SUNNY Day Sheet format
+        // Organization header row 1, Day Sheet title row 2, columns row 3, data rows 4+
+        const headers = [
+          'SL NO',
+          'BRANCH',
+          'DATE',
+          'BOND NO',
+          'MEM ID',
+          'CUSTOMER NAME',
+          'SCHEME NAME & PLAN',
+          'AMOUNT',
+          'NATURE OF RECEIPT',
+        ];
+
+        const rows: any[][] = [
+          ['XYZ COOPERATIVE CREDIT SOCIETY', '', '', '', '', '', '', '', ''],
+          ['DAY SHEET REPORT', '', '', '', '', '', '', '', ''],
+          headers,
+        ];
+
+        // First deposit: Day 1
+        rows.push([1, 'MAIN', '01/01/2025', '38091068', 'MEM-101', 'SOJAN SUNNY', 'DRD 100', 20500, 'OPENING COLLECTION']);
+
+        // 16 collection transactions in final 90 days (Nov/Dec 2025)
+        // Notice: Customer Name is left blank on some rows as happens in branch Day Sheets
+        for (let i = 1; i <= 16; i++) {
+          const day = String(i * 2).padStart(2, '0');
+          const custNameCol = (i % 3 === 0) ? '' : 'SOJAN SUNNY'; // Some rows have empty customer name
+          rows.push([
+            i + 1,
+            'MAIN',
+            `${day}/11/2025`,
+            '38091068',
+            'MEM-101',
+            custNameCol,
+            'DRD 100',
+            1000,
+            `DAILY COLLECTION REC-${i}`,
+          ]);
+        }
+
+        const wb = XLSX.utils.book_new();
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        XLSX.utils.book_append_sheet(wb, ws, 'Sheet2');
+        const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+
+        const parsed = parseRDLedgerWorkbook(buf, 'SOJAN SUNNY(2).xlsx', buf.byteLength);
+
+        // Verification of parsed account
+        assert.equal(parsed.customerName, 'SOJAN SUNNY');
+        assert.equal(parsed.accountNumber, '38091068');
+        assert.equal(parsed.rdType, 'Daily RD');
+        assert.equal(parsed.totalDeposited, 36500);
+
+        // All 16 collections in final 90 days are captured!
+        assert.equal(parsed.final90DayCollectionCount, 16);
+        assert.equal(parsed.actualFinal90DayDeposits, 16000);
+        assert.equal(parsed.required90DayAmount, 9000);
+        assert.equal(parsed.nonProfitAmountA, 7000);
+        assert.equal(parsed.adjustedPrincipalX, 29500);
+        assert.equal(parsed.roundedY, 31338);
+        assert.equal(parsed.maturityAmount, 38338);
+      });
+    });
+  });
 });
+

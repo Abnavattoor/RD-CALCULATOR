@@ -3,7 +3,13 @@ import {
   RDAccountData,
   LedgerTransactionRow,
   RDType,
+  DaySheetCustomer,
+  DailyRD90DayAdjustmentDetails,
 } from '../types';
+import {
+  calculateDailyRDMaturity,
+  getDefaultRateForDuration,
+} from './rdInterestCalculator';
 
 /**
  * Standard validation error used by the application.
@@ -808,6 +814,438 @@ function determineDailySchemeAmount(
  *
  * Missed days are NOT backfilled.
  */
+/**
+ * Normalize an Excel column header name for fuzzy/agnostic matching.
+ */
+export function normalizeHeaderName(val: unknown): string {
+  if (val === null || val === undefined) return '';
+  return String(val)
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Determine the Daily RD scheme installment amount.
+ *
+ * Prioritizes:
+ * 1. Configured scheme installment amount (if explicitly provided or parsed from metadata).
+ * 2. Explicit installment declarations in particulars (e.g. "DRD 100", "Daily RD 100", "₹100/day").
+ * 3. Explicit installment counts in particulars (e.g. "₹1,000 - 10 INSTALLMENTS" -> candidate 1000 / 10 = 100).
+ * 4. Combined and irregular payment analysis:
+ *    - Does NOT assume the most frequent transaction amount is always the actual daily installment
+ *      when customers make combined payments (e.g. ₹500 or ₹1,000 paid multiple times).
+ *    - Analyzes GCD and base divisors to uncover the underlying daily installment.
+ * 5. Most frequent deposit amount (mode) when deposits are regular and consistent.
+ * 6. Fallback: totalAmount / tenureDays.
+ */
+export function determineDailyInstallment(
+  transactions: LedgerTransactionRow[],
+  totalAmount: number,
+  tenureDays: number = 365,
+  configuredSchemeAmount?: number
+): number {
+  // 1. Prioritize explicitly configured scheme installment amount
+  if (configuredSchemeAmount !== undefined && configuredSchemeAmount !== null && configuredSchemeAmount > 0) {
+    return roundMoney(configuredSchemeAmount);
+  }
+
+  const validTransactions = transactions.filter(
+    (t) => t.isValidPayment && !t.isSummaryRow && t.receiptCredit !== null && Number(t.receiptCredit) > 0
+  );
+
+  if (validTransactions.length === 0) {
+    return roundMoney(totalAmount / Math.max(1, tenureDays));
+  }
+
+  // 2. Check scheme text / particulars, ignoring tenure declarations and receipt/voucher numbers
+  for (const t of validTransactions) {
+    const text = (t.particulars || '').toLowerCase();
+    const cleaned = text
+      .replace(/(?:rec(?:eipt)?|vch|voucher|sl\s*no|bill|no)\.?\s*[-#:]?\s*\d+/gi, '')
+      .replace(/\d+\s*(?:days?|months?|years?|d|m|y)\b/gi, '');
+    const match =
+      cleaned.match(/(?:drd|daily\s*rd|rcd)\s*[-#:]?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)/i) ||
+      cleaned.match(/(?:daily\s*installment|scheme\s*amount|daily\s*scheme|daily\s*amount|installment\s*amount)\s*[-#:]?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)/i) ||
+      cleaned.match(/(\d+(?:\.\d+)?)\s*(?:\/|\bper\b)\s*day/i);
+    if (match) {
+      const val = parseFloat(match[1]);
+      if (val > 0 && val <= 100000) return roundMoney(val);
+    }
+  }
+
+  // 3. Check for explicit installment counts in particulars (e.g. "₹1,000 - 10 INSTALLMENT" -> candidate 1000 / 10 = 100)
+  const explicitCandidates: number[] = [];
+  for (const t of validTransactions) {
+    const amt = Number(t.receiptCredit) || 0;
+    const count = parseInstallmentCount(t.particulars);
+    if (count && count > 0 && amt > 0) {
+      const candidate = amt / count;
+      if (candidate > 0) {
+        explicitCandidates.push(roundMoney(candidate));
+      }
+    }
+  }
+  if (explicitCandidates.length > 0) {
+    const freq = new Map<number, number>();
+    for (const c of explicitCandidates) {
+      freq.set(c, (freq.get(c) || 0) + 1);
+    }
+    let best = explicitCandidates[0];
+    let maxC = 0;
+    for (const [c, cnt] of freq.entries()) {
+      if (cnt > maxC) {
+        maxC = cnt;
+        best = c;
+      }
+    }
+    if (best > 0) return best;
+  }
+
+  // 4. Combined and irregular payment analysis:
+  // Customers often pay for multiple days at once (e.g., ₹500, ₹1000, ₹2000).
+  const amounts = validTransactions
+    .map((t) => roundMoney(Number(t.receiptCredit)))
+    .filter((a) => a > 0);
+
+  if (amounts.length > 0) {
+    const intAmounts = amounts.map((a) => Math.round(a * 100));
+    let commonGcd = intAmounts[0];
+    for (let i = 1; i < intAmounts.length; i++) {
+      commonGcd = gcd(commonGcd, intAmounts[i]);
+      if (commonGcd === 1) break;
+    }
+    const gcdVal = commonGcd / 100;
+    const maxPayment = Math.max(...amounts);
+    if (gcdVal >= 10 && (gcdVal < maxPayment || amounts.length === 1)) {
+      return roundMoney(gcdVal);
+    }
+
+    // Check if the minimum positive deposit evenly divides all higher combined deposits
+    const minDeposit = Math.min(...amounts);
+    if (minDeposit >= 10 && minDeposit < maxPayment) {
+      const allDivisible = amounts.every(
+        (a) => Math.abs(a % minDeposit) < 0.01 || Math.abs((a % minDeposit) - minDeposit) < 0.01
+      );
+      if (allDivisible) {
+        return roundMoney(minDeposit);
+      }
+    }
+  }
+
+  // 5. Deposit amount frequency (mode) among valid deposits when not a combined payment
+  const amountCounts = new Map<number, number>();
+  for (const amt of amounts) {
+    amountCounts.set(amt, (amountCounts.get(amt) || 0) + 1);
+  }
+
+  if (amountCounts.size > 0) {
+    let bestAmt = 0;
+    let maxCount = -1;
+    for (const [amt, count] of amountCounts.entries()) {
+      if (count > maxCount) {
+        maxCount = count;
+        bestAmt = amt;
+      }
+    }
+    if (bestAmt > 0) return bestAmt;
+  }
+
+  // 6. Fallback
+  return roundMoney(totalAmount / Math.max(1, tenureDays));
+}
+
+/**
+ * Final rounding rule for Daily RD maturity formula result Y:
+ * - Decimal portion below 0.50: round down.
+ * - Decimal portion equal to or above 0.50: round up.
+ */
+export function roundMaturityY(val: number): number {
+  if (!Number.isFinite(val)) return 0;
+  const intPart = Math.floor(val);
+  const fracPart = val - intPart;
+  return fracPart >= 0.5 ? intPart + 1 : intPart;
+}
+
+/**
+ * Daily RD Non-Profit Calculation Engine.
+ *
+ * Implements the company non-profit 90-day calculation methodology:
+ * 1. Maturity date = first installment date + 365 days (skipped installments do not change maturity date).
+ * 2. Final 90-day period ends on maturity date (between maturityDate - 89 days and maturityDate, inclusive).
+ * 3. Required final-90-day amount = dailyInstallment * 90.
+ * 4. Non-profit amount A:
+ *    A = Math.max(0, actualFinal90DayDeposits - required90DayAmount)
+ *    Post-maturity deposits must not automatically be included in A.
+ * 5. Profit-eligible adjusted principal:
+ *    X = Total Actual Deposits During the Entire RD Period - A.
+ * 6. Calculate maturity amount (Y):
+ *    Calculated on X using the exact existing company Excel Daily RD formula (DALIY sheet).
+ * 7. Final Rounding:
+ *    Round only the final Y maturity amount (<0.50 down, >=0.50 up).
+ * 8. Final Maturity Amount = Rounded Y + A.
+ */
+/**
+ * Helper to determine if a transaction is a qualifying Daily RD collection transaction.
+ */
+export function isCollectionTransaction(txn: LedgerTransactionRow): boolean {
+  if (!txn) return false;
+  if (txn.isSummaryRow || txn.isClosureRow) return false;
+  if (!txn.receiptCredit || Number(txn.receiptCredit) <= 0) return false;
+  if (txn.paymentDebit && Number(txn.paymentDebit) > 0) return false;
+
+  const type = (txn.transactionType || txn.type || '').trim().toUpperCase();
+  if (type === 'COLLECTION' || type === 'DAILY RD COLLECTION' || type === 'RD COLLECTION' || type === 'RECEIPT') {
+    return true;
+  }
+  if (
+    type.includes('LOAN') ||
+    type.includes('RECOVERY') ||
+    type.includes('SHARE') ||
+    type.includes('FEE') ||
+    type.includes('CHARGE') ||
+    type.includes('WITHDRAWAL')
+  ) {
+    return false;
+  }
+
+  const p = (txn.particulars || '').toLowerCase();
+  if (
+    p.includes('loan') ||
+    p.includes('recovery') ||
+    p.includes('share') ||
+    p.includes('fee') ||
+    p.includes('penalty') ||
+    p.includes('charge') ||
+    p.includes('withdrawal') ||
+    p.includes('payout')
+  ) {
+    return false;
+  }
+
+  return txn.isValidPayment !== false;
+}
+
+/**
+ * Safely resolve Date object from a transaction row.
+ */
+export function getTransactionDate(txn?: LedgerTransactionRow): Date | null {
+  if (!txn) return null;
+  if (txn.depositDateObj && !isNaN(txn.depositDateObj.getTime())) {
+    return new Date(txn.depositDateObj.getFullYear(), txn.depositDateObj.getMonth(), txn.depositDateObj.getDate());
+  }
+  if (txn.date) {
+    const d = parseDate(txn.date);
+    if (d && !isNaN(d.getTime())) {
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    }
+  }
+  return null;
+}
+
+/**
+ * Daily RD Non-Profit Calculation Engine.
+ *
+ * Implements the company non-profit 90-day calculation methodology:
+ * 1. Maturity date = first installment date + 365 days (skipped installments do not change maturity date).
+ * 2. Final 90-day period ends on maturity date (between maturityDate - 89 days and maturityDate, inclusive).
+ * 3. Required final-90-day amount = dailyInstallment * 90.
+ * 4. Actual final 90-day deposits:
+ *    Sums EVERY qualifying collection transaction within the final 90 calendar days.
+ *    Does NOT pick only the latest transaction, does NOT pick only one transaction per date,
+ *    and aggregates multiple collections on the same date while preventing duplicates.
+ * 5. Non-profit amount A:
+ *    A = Math.max(0, actualFinal90DayDeposits - required90DayAmount)
+ *    Post-maturity deposits must not automatically be included in A.
+ * 6. Profit-eligible adjusted principal:
+ *    X = Total Actual Deposits During the Entire RD Period - A.
+ * 7. Calculate maturity amount (Y):
+ *    Calculated on X using the exact existing company Excel Daily RD formula (DALIY sheet).
+ * 8. Final Rounding:
+ *    Round only the final Y maturity amount (<0.50 down, >=0.50 up).
+ * 9. Final Maturity Amount = Rounded Y + A.
+ */
+export function calculateDailyRDNonProfitMaturity(
+  transactions: LedgerTransactionRow[],
+  totalAmount: number,
+  dailyAmount: number,
+  annualRate: number,
+  tenureDays: number = 365
+) {
+  // Filter valid transactions with positive deposit amount
+  const validTxns = transactions.filter(
+    (t) => t.isValidPayment && !t.isSummaryRow && !t.isClosureRow && t.receiptCredit !== null && Number(t.receiptCredit) > 0
+  );
+
+  // Find true earliest installment date
+  let firstInstallmentDate: Date | null = null;
+  for (const t of validTxns) {
+    const d = getTransactionDate(t);
+    if (d && (!firstInstallmentDate || d.getTime() < firstInstallmentDate.getTime())) {
+      firstInstallmentDate = d;
+    }
+  }
+  if (!firstInstallmentDate) firstInstallmentDate = new Date();
+  const cleanTenure = Math.max(1, tenureDays);
+
+  // 1. Maturity date = firstInstallmentDate + tenureDays for a Daily RD (skipped installments do NOT change maturity date)
+  const maturityDateObj = new Date(
+    firstInstallmentDate.getFullYear(),
+    firstInstallmentDate.getMonth(),
+    firstInstallmentDate.getDate() + cleanTenure
+  );
+
+  // 2. Period start = maturityDate - 89 calendar days (90-day window including both start date and maturity date)
+  const periodStartObj = new Date(
+    maturityDateObj.getFullYear(),
+    maturityDateObj.getMonth(),
+    maturityDateObj.getDate() - 89
+  );
+
+  const startMidnight = new Date(
+    periodStartObj.getFullYear(),
+    periodStartObj.getMonth(),
+    periodStartObj.getDate()
+  ).getTime();
+
+  const maturityMidnight = new Date(
+    maturityDateObj.getFullYear(),
+    maturityDateObj.getMonth(),
+    maturityDateObj.getDate()
+  ).getTime();
+
+  // Deduplication & Aggregation
+  const seenTxnKeys = new Set<string>();
+  let actualFinal90DayDeposits = 0;
+  let final90DayCollectionCount = 0;
+  let postMaturityDeposits = 0;
+  let totalActualDeposits = 0;
+
+  // Sort valid transactions by date ascending
+  const sortedTxns = [...validTxns].sort((a, b) => {
+    const tA = getTransactionDate(a)?.getTime() || 0;
+    const tB = getTransactionDate(b)?.getTime() || 0;
+    return tA - tB;
+  });
+
+  for (const txn of sortedTxns) {
+    const amt = Number(txn.receiptCredit) || 0;
+    if (amt <= 0) continue;
+
+    const txnDate = getTransactionDate(txn);
+    // Duplicate transaction prevention (if row has receipt number or identical row signature)
+    const txnKey = txn.receiptNumber
+      ? `rcpt:${txn.receiptNumber}`
+      : `${txn.rowNum}_${txnDate ? txnDate.getTime() : 0}_${amt}_${txn.particulars || ''}`;
+
+    if (seenTxnKeys.has(txnKey)) {
+      continue;
+    }
+    seenTxnKeys.add(txnKey);
+
+    totalActualDeposits += amt;
+
+    if (txnDate) {
+      const txnMidnight = txnDate.getTime();
+      if (txnMidnight >= startMidnight && txnMidnight <= maturityMidnight) {
+        if (isCollectionTransaction(txn)) {
+          actualFinal90DayDeposits += amt;
+          final90DayCollectionCount++;
+        }
+      } else if (txnMidnight > maturityMidnight) {
+        postMaturityDeposits += amt;
+        txn.isOverTenure = true;
+      }
+    }
+  }
+
+  actualFinal90DayDeposits = roundMoney(actualFinal90DayDeposits);
+  totalActualDeposits = roundMoney(totalActualDeposits || totalAmount);
+  postMaturityDeposits = roundMoney(postMaturityDeposits);
+
+  // 3. Normalized daily installment shown in the dashboard card
+  const normalizedDailyAmount =
+    dailyAmount > 0
+      ? roundMoney(dailyAmount)
+      : roundMoney(determineDailyInstallment(sortedTxns, totalActualDeposits, cleanTenure, dailyAmount));
+
+  // 4. Required 90-day amount = Daily Installment * 90
+  const required90DayAmount = roundMoney(normalizedDailyAmount * 90);
+
+  // 5. Non-profit amount A = Math.max(0, actualFinal90DayDeposits - required90DayAmount)
+  // Post-maturity deposits must not automatically be included in A. Handle them separately.
+  const nonProfitAmount = Math.max(0, actualFinal90DayDeposits - required90DayAmount);
+  const A = roundMoney(nonProfitAmount);
+
+  // Total actual deposits during the entire RD period (excluding post-maturity deposits)
+  const depositsDuringRDPeriod = roundMoney(Math.max(0, totalActualDeposits - postMaturityDeposits));
+
+  // 6. Adjusted Principal X = Total Actual Deposits During the Entire RD Period - A
+  const profitEligibleAmount = roundMoney(Math.max(0, depositsDuringRDPeriod - A));
+  const X = profitEligibleAmount;
+
+  // 7. Calculate interest on X using exact existing company Excel Daily RD calculation formula
+  const ratePercent = annualRate > 1 ? annualRate : annualRate * 100;
+  const calc = calculateDailyRDMaturity(cleanTenure, X / cleanTenure, ratePercent);
+  const rawY = calc.rawMaturityAmount || 0;
+  const calculationResultY = roundMoney(rawY);
+
+  // 8. Final Rounding: round only the final Y maturity amount (< 0.50 down, >= 0.50 up)
+  const roundedY = roundMaturityY(rawY);
+
+  // 9. Final Maturity Amount = Rounded Y + A
+  const finalMaturityResult = roundMoney(roundedY + A);
+  const totalInterest = roundMoney(finalMaturityResult - depositsDuringRDPeriod);
+
+  const dailyRDAdjustment: DailyRD90DayAdjustmentDetails = {
+    totalActualDeposits,
+    depositsDuringRDPeriod,
+    postMaturityDeposits,
+    final90DayCollectionCount,
+    actualFinal90DayDeposits,
+    required90DayAmount,
+    nonProfitAmountA: A,
+    adjustedPrincipalX: X,
+    calculationResultY,
+    roundedY,
+    finalMaturityAmount: finalMaturityResult,
+    totalInterest,
+    dailyInstallment: normalizedDailyAmount,
+    firstInstallmentDate: formatDateDisplay(firstInstallmentDate),
+    maturityDate: formatDateDisplay(maturityDateObj),
+    periodStartDate: formatDateDisplay(periodStartObj),
+  };
+
+  return {
+    dailySchemeAmount: normalizedDailyAmount,
+    profitEligibleAmount: X,
+    nonProfitAmount: A,
+    nonProfitAmountA: A,
+    adjustedPrincipalX: X,
+    normalizedDailyAmount,
+    totalInterest,
+    maturityAmount: finalMaturityResult,
+    finalMaturityAmount: finalMaturityResult,
+    totalActualDeposits,
+    totalActualDeposited: totalActualDeposits,
+    firstInstallmentDate,
+    maturityDateObj,
+    periodStartObj,
+    required90DayAmount,
+    actualFinal90DayDeposits,
+    final90DayCollectionCount,
+    postMaturityDeposits,
+    depositsDuringRDPeriod,
+    calculationResultY,
+    roundedY,
+    rawY,
+    dailyRDAdjustment,
+  };
+}
+
+/**
+ * Calculate Daily RD wrapping the non-profit engine.
+ */
 function calculateDailyRD(
   transactions: LedgerTransactionRow[],
   totalAmount: number,
@@ -815,196 +1253,445 @@ function calculateDailyRD(
   annualRate: number,
   tenureDays: number
 ) {
-  const validPayments =
-    transactions
-      .filter(
-        (transaction) =>
-          transaction.isValidPayment &&
-          transaction.receiptCredit !== null &&
-          Number(
-            transaction.receiptCredit
-          ) > 0
-      )
-      .map((transaction) => ({
-        transaction,
-        amount:
-          Number(
-            transaction.receiptCredit
-          ),
-      }))
-      .sort((a, b) => {
-        const dateA =
-          a.transaction
-            .depositDateObj;
-
-        const dateB =
-          b.transaction
-            .depositDateObj;
-
-        if (
-          !dateA &&
-          !dateB
-        ) {
-          return 0;
-        }
-
-        if (!dateA) {
-          return 1;
-        }
-
-        if (!dateB) {
-          return -1;
-        }
-
-        return (
-          dateA.getTime() -
-          dateB.getTime()
-        );
-      });
-
-  let profitEligibleAmount = 0;
-  let nonProfitAmount = 0;
-
-  for (
-    const payment
-    of validPayments
-  ) {
-    const amount =
-      roundMoney(
-        payment.amount
-      );
-
-    /**
-     * One daily installment
-     * is eligible on an actual
-     * payment date.
-     */
-    const eligible =
-      Math.min(
-        amount,
-        dailyAmount
-      );
-
-    /**
-     * Everything above the
-     * daily installment is
-     * non-profit.
-     */
-    const nonProfit =
-      Math.max(
-        0,
-        amount - dailyAmount
-      );
-
-    profitEligibleAmount +=
-      eligible;
-
-    nonProfitAmount +=
-      nonProfit;
-  }
-
-  const roundedTotal =
-    roundMoney(
-      totalAmount
-    );
-
-  profitEligibleAmount =
-    roundMoney(
-      profitEligibleAmount
-    );
-
-  nonProfitAmount =
-    roundMoney(
-      nonProfitAmount
-    );
-
-  /**
-   * Safety reconciliation:
-   *
-   * Total Deposited
-   * =
-   * Profit Eligible
-   * +
-   * Non-Profit
-   */
-  const difference =
-    roundMoney(
-      roundedTotal -
-        profitEligibleAmount -
-        nonProfitAmount
-    );
-
-  if (
-    Math.abs(difference) > 0.01
-  ) {
-    nonProfitAmount =
-      roundMoney(
-        Math.max(
-          0,
-          roundedTotal -
-            profitEligibleAmount
-        )
-      );
-  }
-
-  const calculationDays =
-    Math.max(
-      1,
-      tenureDays
-    );
-
-  /**
-   * Normalized Daily Amount
-   *
-   * IMPORTANT:
-   * It is based on the profit-eligible
-   * amount, not the non-profit amount.
-   */
-  const normalizedDailyAmount =
-    profitEligibleAmount /
-    calculationDays;
-
-  /**
-   * Daily RD balance accumulation sequence (Company Excel methodology):
-   * Reference: CALCULATION OF RD - 2026 FEB 04 - 12%(2).xlsx, sheet DALIY
-   */
-  let B = normalizedDailyAmount;
-  let C = calculationDays > 0 ? (annualRate * 100) / calculationDays : 0;
-  let D = B;
-
-  if (calculationDays === 1) {
-    D = B + C;
-  } else if (calculationDays >= 2) {
-    for (let d = 2; d <= calculationDays; d++) {
-      B = (d === 2) ? (normalizedDailyAmount + C) : D;
-      C = (B * annualRate) / 365;
-      D = B + C + normalizedDailyAmount;
-    }
-  }
-  const finalBalance = D + nonProfitAmount;
-
-  const totalInterest = roundMoney(finalBalance - roundedTotal);
-  const maturityAmount = roundMoney(finalBalance);
+  const result = calculateDailyRDNonProfitMaturity(
+    transactions,
+    totalAmount,
+    dailyAmount,
+    annualRate,
+    tenureDays
+  );
 
   return {
-    dailySchemeAmount:
-      roundMoney(
-        dailyAmount
-      ),
-
-    profitEligibleAmount,
-
-    nonProfitAmount,
-
-    normalizedDailyAmount:
-      roundMoney(
-        normalizedDailyAmount
-      ),
-
-    totalInterest,
-
-    maturityAmount,
+    dailySchemeAmount: result.dailySchemeAmount,
+    profitEligibleAmount: result.profitEligibleAmount,
+    nonProfitAmount: result.nonProfitAmount,
+    normalizedDailyAmount: result.normalizedDailyAmount,
+    totalInterest: result.totalInterest,
+    maturityAmount: result.maturityAmount,
+    required90DayAmount: result.required90DayAmount,
+    actualFinal90DayDeposits: result.actualFinal90DayDeposits,
+    calculationResultY: result.calculationResultY,
+    roundedY: result.roundedY,
+    dailyRDAdjustment: result.dailyRDAdjustment,
+    firstInstallmentDate: result.firstInstallmentDate,
+    maturityDateObj: result.maturityDateObj,
+    periodStartObj: result.periodStartObj,
   };
+}
+
+export interface DaySheetColumns {
+  dateCol: number;
+  amountCol: number;
+  customerNameCol: number;
+  membershipIdCol: number;
+  bondNoCol: number;
+  schemeCol: number;
+  natureCol: number;
+}
+
+/**
+ * Detect whether a row serves as the header for a Branch Day Sheet.
+ */
+export function detectDaySheetHeader(row: any[]): DaySheetColumns | null {
+  if (!row || !Array.isArray(row)) return null;
+
+  let dateCol = -1;
+  let amountCol = -1;
+  let customerNameCol = -1;
+  let membershipIdCol = -1;
+  let bondNoCol = -1;
+  let schemeCol = -1;
+  let natureCol = -1;
+
+  for (let c = 0; c < row.length; c++) {
+    const raw = row[c];
+    if (raw === null || raw === undefined) continue;
+    const h = normalizeHeaderName(raw);
+    if (!h) continue;
+
+    // DATE
+    if (h === 'date' || h === 'txndate' || h === 'transactiondate' || h === 'dt') {
+      dateCol = c;
+    }
+    // AMOUNT
+    else if (
+      h === 'amount' ||
+      h === 'depositamount' ||
+      h === 'rcptamount' ||
+      h === 'receiptamount' ||
+      h === 'netamount' ||
+      h === 'paidamount' ||
+      h === 'deposit'
+    ) {
+      amountCol = c;
+    }
+    // CUSTOMER NAME
+    else if (
+      h === 'customername' ||
+      h === 'custname' ||
+      h === 'clientname' ||
+      h === 'name' ||
+      h === 'customer' ||
+      h === 'membername'
+    ) {
+      customerNameCol = c;
+    }
+    // MEMBERSHIP ID
+    else if (
+      h === 'membershipid' ||
+      h === 'memberid' ||
+      h === 'membershipno' ||
+      h === 'memberno' ||
+      h === 'memid' ||
+      h === 'custid'
+    ) {
+      membershipIdCol = c;
+    }
+    // NEW/BOND NO
+    else if (
+      h === 'newbondno' ||
+      h === 'bondno' ||
+      h === 'bondnumber' ||
+      h === 'accountno' ||
+      h === 'acno' ||
+      h === 'accountnumber' ||
+      h === 'bond' ||
+      h === 'newbond'
+    ) {
+      bondNoCol = c;
+    }
+    // SCHEME NAME & PLAN
+    else if (
+      h === 'schemenameplan' ||
+      h === 'schemenameandplan' ||
+      h === 'schemename' ||
+      h === 'scheme' ||
+      h === 'plan' ||
+      h === 'product'
+    ) {
+      schemeCol = c;
+    }
+    // NATURE OF RECEIPT
+    else if (
+      h === 'natureofreceipt' ||
+      h === 'receiptnature' ||
+      h === 'nature' ||
+      h === 'particulars' ||
+      h === 'transactiontype' ||
+      h === 'type' ||
+      h === 'receipttype'
+    ) {
+      natureCol = c;
+    }
+  }
+
+  // A Day sheet must have DATE and AMOUNT, and at least two identifying columns
+  const otherMatches = [customerNameCol, membershipIdCol, bondNoCol, schemeCol, natureCol].filter(
+    (idx) => idx !== -1
+  ).length;
+
+  if (dateCol !== -1 && amountCol !== -1 && otherMatches >= 2) {
+    return {
+      dateCol,
+      amountCol,
+      customerNameCol,
+      membershipIdCol,
+      bondNoCol,
+      schemeCol,
+      natureCol,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Parse a Branch Day Sheet (e.g. SOJAN SUNNY(2).xlsx Sheet2).
+ */
+export function parseDaySheetRows(
+  sheetRows: any[][],
+  headerRowIndex: number,
+  cols: DaySheetColumns,
+  fileName: string,
+  fileSize: number,
+  sheetName: string,
+  activeCustomerKey?: string
+): RDAccountData {
+  interface CustomerGroup {
+    customerKey: string;
+    customerName: string;
+    membershipId: string;
+    bondNumber: string;
+    schemeName: string;
+    transactions: LedgerTransactionRow[];
+    totalDeposited: number;
+  }
+
+  const customerGroups: CustomerGroup[] = [];
+
+  for (let r = headerRowIndex + 1; r < sheetRows.length; r++) {
+    const row = sheetRows[r];
+    if (!row || !Array.isArray(row)) continue;
+
+    const rowValues = row.map((c) => String(c || '').trim());
+    const isBlank = rowValues.every((c) => c === '');
+    if (isBlank) continue;
+
+    // Check if summary row
+    const firstCell = rowValues[0] || '';
+    if (isRowSummary(firstCell, '', row)) continue;
+
+    const rawDate = row[cols.dateCol];
+    const rawAmount = row[cols.amountCol];
+    const amount = parseNumericAmount(rawAmount);
+
+    if (amount === null || amount <= 0) continue;
+
+    const custName = cols.customerNameCol !== -1 ? String(row[cols.customerNameCol] || '').trim() : '';
+    const memId = cols.membershipIdCol !== -1 ? String(row[cols.membershipIdCol] || '').trim() : '';
+    const bondNo = cols.bondNoCol !== -1 ? String(row[cols.bondNoCol] || '').trim() : '';
+    const scheme = cols.schemeCol !== -1 ? String(row[cols.schemeCol] || '').trim() : '';
+    const nature = cols.natureCol !== -1 ? String(row[cols.natureCol] || '').trim() : '';
+
+    // Discard non-deposit entries or non-RD receipts
+    const lowerNature = nature.toLowerCase();
+    const lowerScheme = scheme.toLowerCase();
+    if (
+      lowerNature.includes('loan') ||
+      lowerNature.includes('recovery') ||
+      lowerNature.includes('share') ||
+      lowerNature.includes('withdrawal') ||
+      lowerNature.includes('fixed deposit') ||
+      lowerNature.includes('charges') ||
+      lowerNature.includes('penalty') ||
+      lowerNature.includes('expense')
+    ) {
+      continue;
+    }
+    if (
+      lowerScheme.includes('loan') ||
+      lowerScheme.includes('fixed deposit') ||
+      lowerScheme.includes('fd') ||
+      lowerScheme.includes('share')
+    ) {
+      continue;
+    }
+
+    const dateObj = parseDate(rawDate);
+    const dateStr = dateObj ? formatDateDisplay(dateObj) : String(rawDate || '');
+
+    // Unify customer across bondNo, custName, and memId
+    let group = customerGroups.find((g) => {
+      if (bondNo && bondNo !== 'Not Specified' && g.bondNumber && g.bondNumber.toLowerCase() === bondNo.toLowerCase()) {
+        return true;
+      }
+      if (custName && custName !== 'Not Specified' && g.customerName && g.customerName.toLowerCase() === custName.toLowerCase()) {
+        return true;
+      }
+      if (memId && memId !== 'Not Specified' && g.membershipId && g.membershipId.toLowerCase() === memId.toLowerCase()) {
+        return true;
+      }
+      return false;
+    });
+
+    const canonicalKey = (custName || bondNo || memId || `Customer-${customerGroups.length + 1}`).trim();
+
+    if (!group) {
+      group = {
+        customerKey: canonicalKey,
+        customerName: custName || 'Not Specified',
+        membershipId: memId || 'Not Specified',
+        bondNumber: bondNo || 'Not Specified',
+        schemeName: scheme,
+        transactions: [],
+        totalDeposited: 0,
+      };
+      customerGroups.push(group);
+    }
+
+    if (group.customerName === 'Not Specified' && custName) {
+      group.customerName = custName;
+    }
+    if (group.bondNumber === 'Not Specified' && bondNo) {
+      group.bondNumber = bondNo;
+    }
+    if (group.membershipId === 'Not Specified' && memId) {
+      group.membershipId = memId;
+    }
+    if (!group.schemeName && scheme) {
+      group.schemeName = scheme;
+    }
+
+    const isCollection =
+      lowerNature.includes('collection') ||
+      lowerNature.includes('receipt') ||
+      lowerNature.includes('rcpt') ||
+      lowerNature.includes('deposit') ||
+      lowerNature.includes('drd') ||
+      lowerNature.includes('daily') ||
+      !lowerNature;
+    const txnType = isCollection ? 'COLLECTION' : (nature || 'COLLECTION').toUpperCase();
+
+    group.transactions.push({
+      rowNum: r + 1,
+      date: dateStr,
+      depositDateObj: dateObj,
+      particulars: [scheme, nature].filter(Boolean).join(' - ') || 'Daily RD Collection',
+      receiptCredit: roundMoney(amount),
+      rawReceiptCredit: rawAmount,
+      amount: roundMoney(amount),
+      type: txnType,
+      transactionType: txnType,
+      isSummaryRow: false,
+      isValidPayment: true,
+    });
+    group.totalDeposited = roundMoney(group.totalDeposited + amount);
+  }
+
+  if (customerGroups.length === 0) {
+    throw new RDValidationError(
+      'No Valid RD Transactions Found',
+      'The uploaded Day Sheet did not contain any valid RD deposit transactions.'
+    );
+  }
+
+  const availableCustomers: DaySheetCustomer[] = [];
+  for (const group of customerGroups) {
+    availableCustomers.push({
+      customerName: group.customerName,
+      membershipId: group.membershipId,
+      bondNumber: group.bondNumber,
+      transactionCount: group.transactions.length,
+      totalDeposited: group.totalDeposited,
+    });
+  }
+
+  // Determine active customer
+  let selectedGroup: CustomerGroup | undefined;
+  if (activeCustomerKey) {
+    selectedGroup = customerGroups.find(
+      (g) =>
+        g.customerKey === activeCustomerKey ||
+        g.customerName.toLowerCase() === activeCustomerKey.toLowerCase() ||
+        g.bondNumber.toLowerCase() === activeCustomerKey.toLowerCase()
+    );
+  }
+
+  if (!selectedGroup) {
+    // 1. Check if filename matches a customer name or bond number
+    const upperFile = fileName.toUpperCase();
+    selectedGroup = customerGroups.find(
+      (g) =>
+        (g.customerName && g.customerName !== 'Not Specified' && upperFile.includes(g.customerName.toUpperCase())) ||
+        (g.bondNumber && g.bondNumber !== 'Not Specified' && upperFile.includes(g.bondNumber.toUpperCase()))
+    );
+
+    // 2. Otherwise default to the customer with the most transactions
+    if (!selectedGroup) {
+      selectedGroup = customerGroups.reduce((prev, curr) =>
+        curr.transactions.length > prev.transactions.length ? curr : prev
+      );
+    }
+  }
+
+  const activeGroup = selectedGroup || customerGroups[0];
+  const tenureDays = 365;
+  const annualRate = 12.0;
+
+  // Detect daily installment from scheme or particulars if available
+  let detectedSchemeDaily = 0;
+  if (activeGroup.schemeName) {
+    const cleanedScheme = activeGroup.schemeName
+      .replace(/\d+\s*(?:days?|months?|years?|d|m|y)\b/gi, '')
+      .replace(/(?:rec(?:eipt)?|vch|voucher|sl\s*no|bill|no)\.?\s*[-#:]?\s*\d+/gi, '');
+    const m =
+      cleanedScheme.match(/(?:drd|daily\s*rd|rcd)\s*[-#:]?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)/i) ||
+      cleanedScheme.match(/(?:daily\s*installment|scheme\s*amount|daily\s*scheme|daily\s*amount|installment\s*amount)\s*[-#:]?\s*(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)/i) ||
+      cleanedScheme.match(/(\d+(?:\.\d+)?)\s*(?:\/|\bper\b)\s*day/i);
+    if (m) {
+      const val = parseFloat(m[1]);
+      if (val > 0 && val <= 100000) detectedSchemeDaily = val;
+    }
+  }
+
+  const result = calculateDailyRDNonProfitMaturity(
+    activeGroup.transactions,
+    activeGroup.totalDeposited,
+    detectedSchemeDaily,
+    annualRate,
+    tenureDays
+  );
+
+  return {
+    fileName,
+    fileSize,
+    sheetName,
+    customerName: activeGroup.customerName,
+    accountNumber:
+      activeGroup.bondNumber !== 'Not Specified'
+        ? activeGroup.bondNumber
+        : activeGroup.membershipId !== 'Not Specified'
+        ? activeGroup.membershipId
+        : 'Not Specified',
+    rdType: 'Daily RD',
+    openingDate: formatDateDisplay(result.firstInstallmentDate),
+    maturityDate: formatDateDisplay(result.maturityDateObj),
+    interestRate: `${annualRate.toFixed(2)}%`,
+    annualRate: annualRate / 100,
+    selectedInterestRate: annualRate,
+    period: `${tenureDays} Days`,
+    tenureDays,
+    transactions: activeGroup.transactions,
+    totalDeposited: roundMoney(activeGroup.totalDeposited),
+    dailySchemeAmount: result.dailySchemeAmount,
+    profitEligibleAmount: result.profitEligibleAmount,
+    nonProfitAmount: result.nonProfitAmount,
+    nonProfitAmountA: result.nonProfitAmountA,
+    adjustedPrincipalX: result.adjustedPrincipalX,
+    normalizedDailyAmount: result.normalizedDailyAmount,
+    totalInterest: result.totalInterest,
+    maturityAmount: result.maturityAmount,
+    final90DayCollectionCount: result.final90DayCollectionCount,
+    actualFinal90DayDeposits: result.actualFinal90DayDeposits,
+    required90DayAmount: result.required90DayAmount,
+    calculationResultY: result.calculationResultY,
+    roundedY: result.roundedY,
+    dailyRDAdjustment: result.dailyRDAdjustment,
+    validTransactionCount: activeGroup.transactions.length,
+    hasSummaryRow: false,
+    returnRate: annualRate,
+    returnAmount: result.totalInterest,
+    isDaySheet: true,
+    daySheetCustomers: availableCustomers,
+    selectedCustomerKey: activeGroup.customerKey,
+    rawDaySheetCustomersData: {
+      sheetRows,
+      headerRowIndex,
+      cols,
+      fileName,
+      fileSize,
+      sheetName,
+    },
+  };
+}
+
+export function selectDaySheetCustomer(
+  accountData: RDAccountData,
+  customerKey: string
+): RDAccountData {
+  if (!accountData.isDaySheet || !accountData.rawDaySheetCustomersData) {
+    return accountData;
+  }
+  const raw = accountData.rawDaySheetCustomersData;
+  return parseDaySheetRows(
+    raw.sheetRows,
+    raw.headerRowIndex,
+    raw.cols,
+    raw.fileName,
+    raw.fileSize,
+    raw.sheetName,
+    customerKey
+  );
 }
 
 /**
@@ -1054,8 +1741,56 @@ export function parseRDLedgerWorkbook(
 
   /**
    * ================================================================
+   * STEP 0: Day Sheet Detection (e.g. SOJAN SUNNY(2).xlsx Sheet2)
+   * Check if any worksheet in the workbook is a Branch Day Sheet.
+   * Ignore summary sheets with broken #REF! formulas (such as
+   * TOTAL BUSINESS or AGENT REPORT).
+   * ================================================================
+   */
+  for (const sheetName of workbook.SheetNames) {
+    const cleanLower = sheetName.toLowerCase().replace(/[\s\-_()]/g, '');
+    if (
+      cleanLower.includes('totalbusiness') ||
+      cleanLower.includes('agentreport') ||
+      cleanLower.includes('agentwise') ||
+      cleanLower === 'total' ||
+      cleanLower === 'summary'
+    ) {
+      continue;
+    }
+
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) continue;
+    ensureAccurateWorksheetRange(sheet);
+
+    const rows = XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      defval: '',
+      blankrows: true,
+    }) as any[][];
+
+    if (!rows || rows.length === 0) continue;
+
+    const scanLimit = Math.min(rows.length, 15);
+    for (let r = 0; r < scanLimit; r++) {
+      const daySheetCols = detectDaySheetHeader(rows[r]);
+      if (daySheetCols) {
+        return parseDaySheetRows(
+          rows,
+          r,
+          daySheetCols,
+          fileName,
+          fileSize,
+          sheetName
+        );
+      }
+    }
+  }
+
+  /**
+   * ================================================================
    * STEP 1
-   * Find the best worksheet.
+   * Find the best worksheet for conventional RD Personal Ledger.
    * ================================================================
    */
 
@@ -1109,6 +1844,17 @@ export function parseRDLedgerWorkbook(
           /[\s\-_()]/g,
           ''
         );
+
+    // Skip summary sheets with broken formulas
+    if (
+      cleanName.includes('totalbusiness') ||
+      cleanName.includes('agentreport') ||
+      cleanName.includes('agentwise') ||
+      cleanName === 'total' ||
+      cleanName === 'summary'
+    ) {
+      continue;
+    }
 
     if (
       cleanName ===
@@ -1486,7 +2232,7 @@ export function parseRDLedgerWorkbook(
   ) {
     throw new RDValidationError(
       'Invalid Ledger Format',
-      'Please upload a valid RD Personal Ledger Excel file.'
+      'Please upload a valid RD Personal Ledger or Day Sheet Excel file. Expected transaction headers (e.g. DATE, AMOUNT, CUSTOMER NAME, NEW/BOND NO, or Receipt / Credit) were not found.'
     );
   }
 
@@ -2984,6 +3730,21 @@ export function parseRDLedgerWorkbook(
       maturityAmount:
         calculation.maturityAmount,
 
+      actualFinal90DayDeposits:
+        calculation.actualFinal90DayDeposits,
+
+      required90DayAmount:
+        calculation.required90DayAmount,
+
+      calculationResultY:
+        calculation.calculationResultY,
+
+      roundedY:
+        calculation.roundedY,
+
+      dailyRDAdjustment:
+        calculation.dailyRDAdjustment,
+
       validTransactionCount,
 
       hasSummaryRow,
@@ -3330,6 +4091,21 @@ export function parseRDLedgerWorkbook(
 
     maturityAmount:
       fallback.maturityAmount,
+
+    actualFinal90DayDeposits:
+      fallback.actualFinal90DayDeposits,
+
+    required90DayAmount:
+      fallback.required90DayAmount,
+
+    calculationResultY:
+      fallback.calculationResultY,
+
+    roundedY:
+      fallback.roundedY,
+
+    dailyRDAdjustment:
+      fallback.dailyRDAdjustment,
 
     validTransactionCount,
 

@@ -136,6 +136,25 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
           data.totalDeposited - nonProfitAmount
         );
 
+  // Daily RD 90-Day Adjustment Breakdown details
+  const dailyAdj = data.dailyRDAdjustment;
+  const final90DayCollectionCount =
+    dailyAdj?.final90DayCollectionCount ?? data.final90DayCollectionCount ?? 0;
+  const actualFinal90DayDeposits =
+    dailyAdj?.actualFinal90DayDeposits ?? data.actualFinal90DayDeposits ?? 0;
+  const required90DayAmount =
+    dailyAdj?.required90DayAmount ?? data.required90DayAmount ?? (data.normalizedDailyAmount * 90);
+  const calculationResultY =
+    dailyAdj?.calculationResultY ?? data.calculationResultY ?? (data.totalInterest + profitEligibleAmount);
+  const roundedY =
+    dailyAdj?.roundedY ?? data.roundedY ?? Math.round(calculationResultY);
+  const nonProfitAmountA =
+    dailyAdj?.nonProfitAmountA ?? nonProfitAmount;
+  const adjustedPrincipalX =
+    dailyAdj?.adjustedPrincipalX ?? profitEligibleAmount;
+  const finalMaturityAmountYPlusA =
+    dailyAdj?.finalMaturityAmount ?? (roundedY + nonProfitAmountA);
+
   // ========================================================================
   // MONTHLY RD - LAST PROFITABLE PAYMENT DATE
   // ========================================================================
@@ -543,7 +562,7 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
                 <p className="text-xs text-orange-700 mt-2 leading-relaxed">
 
                   {isDaily
-                    ? 'Late / excess payment not eligible for Daily RD profit.'
+                    ? 'Excess payment amount not eligible for Daily RD profit.'
                     : 'Payment made during the 15-day relaxation period is not eligible for Monthly RD profit.'}
 
                 </p>
@@ -661,13 +680,25 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
 
             <div className="px-5 py-4 bg-gray-50 border-b border-gray-200">
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center justify-between">
 
-                <Calculator className="w-4 h-4 text-blue-600" />
+                <div className="flex items-center gap-2">
 
-                <h3 className="text-sm font-bold text-gray-900">
-                  Maturity Amount Breakdown
-                </h3>
+                  <Calculator className="w-4 h-4 text-blue-600" />
+
+                  <h3 className="text-sm font-bold text-gray-900">
+                    {isDaily
+                      ? 'Daily RD 90-Day Non-Profit Adjustment Breakdown'
+                      : 'Maturity Amount Breakdown'}
+                  </h3>
+
+                </div>
+
+                {isDaily && (
+                  <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-blue-100 text-blue-800">
+                    Rounded Y + A Rule
+                  </span>
+                )}
 
               </div>
 
@@ -675,87 +706,216 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
 
             <div className="p-5">
 
-              <div className="space-y-3 text-sm">
+              {isDaily ? (
+                /* Daily RD transparent 9-step breakdown */
+                <div className="space-y-3 text-sm">
 
-                {/* TOTAL DEPOSITED */}
+                  {/* 1. Total actual deposits */}
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-gray-700">
+                      1. Total Actual Deposits
+                    </span>
+                    <span className="font-semibold font-mono text-gray-900">
+                      {formatCurrency(data.totalDeposited)}
+                    </span>
+                  </div>
 
-                <div className="flex items-center justify-between gap-4">
+                  {/* 2. Number of qualifying final 90-day collection transactions */}
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex flex-col">
+                      <span className="text-gray-700">
+                        2. Number of qualifying final 90-day collection transactions
+                      </span>
+                      <span className="text-xs text-gray-500">
+                        Total collection transactions recorded within the final 90-day period
+                      </span>
+                    </div>
+                    <span className="font-semibold font-mono text-blue-800">
+                      {final90DayCollectionCount}
+                    </span>
+                  </div>
 
-                  <span className="text-gray-600">
-                    Total Amount Deposited
-                  </span>
+                  {/* 3. Actual deposits in final 90 days */}
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex flex-col">
+                      <span className="text-gray-700">
+                        3. Actual Deposits in Final 90 Days
+                      </span>
+                      <span className="text-xs text-gray-500">
+                        Sum of all qualifying collections ({final90DayCollectionCount} txns) received in final 90 calendar days
+                      </span>
+                    </div>
+                    <span className="font-semibold font-mono text-gray-900">
+                      {formatCurrency(actualFinal90DayDeposits)}
+                    </span>
+                  </div>
 
-                  <span className="font-semibold font-mono text-gray-900">
-                    {formatCurrency(data.totalDeposited)}
-                  </span>
+                  {/* 4. Required amount for final 90 days */}
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex flex-col">
+                      <span className="text-gray-700">
+                        4. Required Amount for Final 90 Days
+                      </span>
+                      <span className="text-xs text-gray-500">
+                        Daily Installment ({formatCurrency(data.normalizedDailyAmount)}) × 90
+                      </span>
+                    </div>
+                    <span className="font-semibold font-mono text-gray-900">
+                      {formatCurrency(required90DayAmount)}
+                    </span>
+                  </div>
+
+                  {/* 5. Non-profit amount (A) */}
+                  <div className="flex items-center justify-between gap-4 bg-orange-50/70 p-2.5 rounded-lg border border-orange-200">
+                    <div className="flex flex-col">
+                      <span className="font-medium text-orange-900">
+                        5. Non-Profit Amount (A)
+                      </span>
+                      <span className="text-xs text-orange-700">
+                        MAX(0, Actual Deposits in Final 90 Days − Required Amount)
+                      </span>
+                    </div>
+                    <span className="font-bold font-mono text-orange-700 text-base">
+                      {formatCurrency(nonProfitAmountA)}
+                    </span>
+                  </div>
+
+                  {/* 6. Adjusted principal (X) */}
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex flex-col">
+                      <span className="text-gray-700">
+                        6. Adjusted Principal (X)
+                      </span>
+                      <span className="text-xs text-gray-500">
+                        Total Actual Deposits − Non-Profit Amount (A)
+                      </span>
+                    </div>
+                    <span className="font-semibold font-mono text-blue-700">
+                      {formatCurrency(adjustedPrincipalX)}
+                    </span>
+                  </div>
+
+                  {/* 7. Interest/maturity calculation result (Y) */}
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex flex-col">
+                      <span className="text-gray-700">
+                        7. Maturity Calculation Result (Y)
+                      </span>
+                      <span className="text-xs text-gray-500">
+                        Company Excel Daily RD calculation formula on Adjusted Principal X
+                      </span>
+                    </div>
+                    <span className="font-semibold font-mono text-emerald-700">
+                      {formatCurrency(calculationResultY)}
+                    </span>
+                  </div>
+
+                  {/* 8. Rounded maturity amount */}
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex flex-col">
+                      <span className="text-gray-700">
+                        8. Rounded Maturity Amount
+                      </span>
+                      <span className="text-xs text-gray-500">
+                        Half-up rounding (&lt;0.50 down, ≥0.50 up) applied to Y
+                      </span>
+                    </div>
+                    <span className="font-semibold font-mono text-emerald-800">
+                      {formatCurrency(roundedY)}
+                    </span>
+                  </div>
+
+                  {/* 9. Final maturity amount */}
+                  <div className="border-t border-gray-200 pt-3 flex items-center justify-between gap-4 bg-blue-50/60 p-3 rounded-lg border border-blue-200 mt-2">
+                    <div className="flex flex-col">
+                      <span className="font-bold text-gray-900 text-base">
+                        9. Final Maturity Amount
+                      </span>
+                      <span className="text-xs text-blue-800 font-medium">
+                        Rounded Y ({formatCurrency(roundedY)}) + Non-Profit Amount A ({formatCurrency(nonProfitAmountA)})
+                      </span>
+                    </div>
+                    <span className="font-extrabold font-mono text-blue-700 text-lg">
+                      {formatCurrency(finalMaturityAmountYPlusA)}
+                    </span>
+                  </div>
+
+                  {/* Post-Maturity Deposits (Handled separately) */}
+                  {data.postMaturityDeposits !== undefined && data.postMaturityDeposits > 0 && (
+                    <div className="flex items-center justify-between gap-4 p-2.5 rounded-lg bg-gray-50 border border-gray-200 text-xs mt-2">
+                      <div className="flex flex-col">
+                        <span className="font-semibold text-gray-700">
+                          Post-Maturity Deposits (Handled Separately)
+                        </span>
+                        <span className="text-gray-500">
+                          Deposits received after maturity date ({data.maturityDate || ''}) are handled separately and not included in A
+                        </span>
+                      </div>
+                      <span className="font-mono font-semibold text-gray-800">
+                        {formatCurrency(data.postMaturityDeposits)}
+                      </span>
+                    </div>
+                  )}
 
                 </div>
+              ) : (
+                /* Monthly RD breakdown */
+                <div className="space-y-3 text-sm">
 
-                {/* PROFIT ELIGIBLE */}
-
-                {(isDaily || isMonthly) && (
-
+                  {/* TOTAL DEPOSITED */}
                   <div className="flex items-center justify-between gap-4">
+                    <span className="text-gray-600">
+                      Total Amount Deposited
+                    </span>
+                    <span className="font-semibold font-mono text-gray-900">
+                      {formatCurrency(data.totalDeposited)}
+                    </span>
+                  </div>
 
+                  {/* PROFIT ELIGIBLE */}
+                  <div className="flex items-center justify-between gap-4">
                     <span className="text-gray-600">
                       Profit-Eligible Amount
                     </span>
-
                     <span className="font-semibold font-mono text-blue-700">
                       {formatCurrency(profitEligibleAmount)}
                     </span>
-
                   </div>
 
-                )}
+                  {/* NON-PROFIT */}
+                  {nonProfitAmount > 0 && (
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="text-orange-700">
+                        Non-Profit Amount
+                      </span>
+                      <span className="font-semibold font-mono text-orange-700">
+                        {formatCurrency(nonProfitAmount)}
+                      </span>
+                    </div>
+                  )}
 
-                {/* NON-PROFIT */}
-
-                {(isDaily || isMonthly) && nonProfitAmount > 0 && (
-
+                  {/* TOTAL INTEREST */}
                   <div className="flex items-center justify-between gap-4">
-
-                    <span className="text-orange-700">
-                      Non-Profit Amount
+                    <span className="text-gray-600">
+                      Total Interest Earned
                     </span>
-
-                    <span className="font-semibold font-mono text-orange-700">
-                      {formatCurrency(nonProfitAmount)}
+                    <span className="font-semibold font-mono text-emerald-700">
+                      + {formatCurrency(data.totalInterest)}
                     </span>
-
                   </div>
 
-                )}
-
-                {/* TOTAL INTEREST */}
-
-                <div className="flex items-center justify-between gap-4">
-
-                  <span className="text-gray-600">
-                    Total Interest Earned
-                  </span>
-
-                  <span className="font-semibold font-mono text-emerald-700">
-                    + {formatCurrency(data.totalInterest)}
-                  </span>
+                  {/* FINAL MATURITY */}
+                  <div className="border-t border-gray-200 pt-3 flex items-center justify-between gap-4">
+                    <span className="font-bold text-gray-900">
+                      Final Maturity Amount
+                    </span>
+                    <span className="font-bold font-mono text-blue-700 text-base">
+                      {formatCurrency(data.maturityAmount)}
+                    </span>
+                  </div>
 
                 </div>
-
-                {/* FINAL MATURITY */}
-
-                <div className="border-t border-gray-200 pt-3 flex items-center justify-between gap-4">
-
-                  <span className="font-bold text-gray-900">
-                    Final Maturity Amount
-                  </span>
-
-                  <span className="font-bold font-mono text-blue-700 text-base">
-                    {formatCurrency(data.maturityAmount)}
-                  </span>
-
-                </div>
-
-              </div>
+              )}
 
             </div>
 

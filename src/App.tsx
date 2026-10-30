@@ -9,6 +9,7 @@ import { RDAccountData, RDParseError } from './types';
 
 import {
   parseRDLedgerWorkbook,
+  selectDaySheetCustomer,
   RDValidationError,
 } from './utils/excelParser';
 
@@ -112,6 +113,14 @@ export default function App() {
         rate
       );
     });
+  };
+
+  const handleSelectCustomer = (customerKey: string) => {
+    if (!accountData) return;
+    const switched = selectDaySheetCustomer(accountData, customerKey);
+    const activeRate = selectedInterestRate || (switched.annualRate * 100);
+    const recalculated = recalculateRDWithRate(switched, activeRate);
+    setAccountData(recalculated);
   };
 
   // ===========================================================================
@@ -1230,6 +1239,7 @@ export default function App() {
 
                 <CustomerDetails
                   data={accountData}
+                  onSelectCustomer={handleSelectCustomer}
                 />
 
                 <LedgerPreview

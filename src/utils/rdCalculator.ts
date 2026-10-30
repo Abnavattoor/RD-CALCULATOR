@@ -3,7 +3,10 @@ import {
   MonthlyRDInstallmentPeriod,
   MonthlyRDCalculationLog,
   MaturityRolloverDetails,
+  DailyRD90DayAdjustmentDetails,
 } from '../types';
+import { calculateDailyRDMaturity } from './rdInterestCalculator';
+import { calculateDailyRDNonProfitMaturity, roundMaturityY } from './excelParser';
 
 export function roundAmount(value: number): number {
   return Math.round((value + Number.EPSILON) * 100) / 100;
@@ -237,43 +240,84 @@ export function recalculateRDWithRate(
         ? data.tenureDays
         : 365;
 
-    const profitEligibleAmount = roundAmount(
-      data.profitEligibleAmount !== undefined
-        ? data.profitEligibleAmount
-        : totalDeposited
-    );
+    let profitEligibleAmount: number;
+    let nonProfitAmount: number;
+    let normalizedDailyAmount: number;
+    let totalInterest: number;
+    let maturityAmount: number;
+    let actualFinal90DayDeposits: number;
+    let required90DayAmount: number;
+    let calculationResultY: number;
+    let roundedY: number;
+    let postMaturityDeposits: number | undefined;
+    let final90DayCollectionCount: number;
+    let dailyRDAdjustment: DailyRD90DayAdjustmentDetails | undefined;
 
-    const nonProfitAmount = roundAmount(
-      data.nonProfitAmount !== undefined
-        ? data.nonProfitAmount
-        : Math.max(
-            0,
-            totalDeposited - profitEligibleAmount
-          )
-    );
-
-    const normalizedDailyAmount =
-      profitEligibleAmount / tenureDays;
-
-    // Daily RD balance accumulation sequence (Company Excel methodology):
-    // Reference: CALCULATION OF RD - 2026 FEB 04 - 12%(2).xlsx, sheet DALIY
-    let B = normalizedDailyAmount;
-    let C = tenureDays > 0 ? (safeRate / tenureDays) : 0;
-    let D = B;
-
-    if (tenureDays === 1) {
-      D = B + C;
-    } else if (tenureDays >= 2) {
-      for (let d = 2; d <= tenureDays; d++) {
-        B = (d === 2) ? (normalizedDailyAmount + C) : D;
-        C = (B * (safeRate / 100)) / 365;
-        D = B + C + normalizedDailyAmount;
-      }
+    if (data.transactions && data.transactions.length > 0) {
+      const nonProfitRes = calculateDailyRDNonProfitMaturity(
+        data.transactions,
+        totalDeposited,
+        data.dailySchemeAmount || data.normalizedDailyAmount || 0,
+        safeRate,
+        tenureDays
+      );
+      profitEligibleAmount = nonProfitRes.profitEligibleAmount;
+      nonProfitAmount = nonProfitRes.nonProfitAmount;
+      normalizedDailyAmount = nonProfitRes.normalizedDailyAmount;
+      totalInterest = nonProfitRes.totalInterest;
+      maturityAmount = nonProfitRes.maturityAmount;
+      actualFinal90DayDeposits = nonProfitRes.actualFinal90DayDeposits;
+      final90DayCollectionCount = nonProfitRes.final90DayCollectionCount;
+      required90DayAmount = nonProfitRes.required90DayAmount;
+      calculationResultY = nonProfitRes.calculationResultY;
+      roundedY = nonProfitRes.roundedY;
+      postMaturityDeposits = nonProfitRes.postMaturityDeposits;
+      dailyRDAdjustment = nonProfitRes.dailyRDAdjustment;
+    } else {
+      nonProfitAmount = roundAmount(
+        data.nonProfitAmount !== undefined
+          ? data.nonProfitAmount
+          : 0
+      );
+      postMaturityDeposits = roundAmount(data.postMaturityDeposits || 0);
+      const depositsDuringRDPeriod = roundAmount(Math.max(0, totalDeposited - postMaturityDeposits));
+      profitEligibleAmount = roundAmount(
+        data.profitEligibleAmount !== undefined
+          ? data.profitEligibleAmount
+          : Math.max(0, depositsDuringRDPeriod - nonProfitAmount)
+      );
+      normalizedDailyAmount = roundAmount(
+        data.normalizedDailyAmount !== undefined && data.normalizedDailyAmount > 0
+          ? data.normalizedDailyAmount
+          : (data.dailySchemeAmount || profitEligibleAmount / tenureDays)
+      );
+      const calcResult = calculateDailyRDMaturity(tenureDays, profitEligibleAmount / tenureDays, safeRate);
+      const rawY = calcResult.rawMaturityAmount || 0;
+      calculationResultY = roundAmount(rawY);
+      roundedY = roundMaturityY(rawY);
+      maturityAmount = roundAmount(roundedY + nonProfitAmount);
+      totalInterest = roundAmount(maturityAmount - depositsDuringRDPeriod);
+      required90DayAmount = data.required90DayAmount !== undefined ? data.required90DayAmount : roundAmount(normalizedDailyAmount * 90);
+      actualFinal90DayDeposits = data.actualFinal90DayDeposits !== undefined ? data.actualFinal90DayDeposits : (nonProfitAmount + required90DayAmount);
+      final90DayCollectionCount = data.final90DayCollectionCount !== undefined
+        ? data.final90DayCollectionCount
+        : (actualFinal90DayDeposits > 0 ? Math.round(actualFinal90DayDeposits / (normalizedDailyAmount || 100)) : 0);
+      dailyRDAdjustment = {
+        totalActualDeposits: totalDeposited,
+        depositsDuringRDPeriod,
+        postMaturityDeposits,
+        final90DayCollectionCount,
+        actualFinal90DayDeposits,
+        required90DayAmount,
+        nonProfitAmountA: nonProfitAmount,
+        adjustedPrincipalX: profitEligibleAmount,
+        calculationResultY,
+        roundedY,
+        finalMaturityAmount: maturityAmount,
+        totalInterest,
+        dailyInstallment: normalizedDailyAmount,
+      };
     }
-    const finalBalance = D + nonProfitAmount;
-
-    const totalInterest = roundAmount(finalBalance - totalDeposited);
-    const maturityAmount = roundAmount(finalBalance);
 
     return {
       ...data,
@@ -295,6 +339,20 @@ export function recalculateRDWithRate(
       totalInterest,
 
       maturityAmount,
+
+      actualFinal90DayDeposits,
+
+      final90DayCollectionCount,
+
+      required90DayAmount,
+
+      calculationResultY,
+
+      roundedY,
+
+      postMaturityDeposits,
+
+      dailyRDAdjustment,
 
       returnRate: safeRate,
 

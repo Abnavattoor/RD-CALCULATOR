@@ -23,6 +23,10 @@ export interface LedgerTransactionRow {
   isClosureRow?: boolean;
   isOverTenure?: boolean;
   installmentAllocationCount?: number;
+  type?: string;
+  transactionType?: string;
+  amount?: number;
+  receiptNumber?: string;
 }
 
 export interface MonthlyRDInstallmentPeriod {
@@ -128,6 +132,50 @@ export interface RDAccountData {
   preClosureCharges?: number;
   netPayment?: number;
   missingFieldsWarning?: string;
+
+  // Day Sheet fields
+  isDaySheet?: boolean;
+  daySheetCustomers?: DaySheetCustomer[];
+  selectedCustomerKey?: string;
+  rawDaySheetCustomersData?: Record<string, any>;
+
+  // Daily RD 90-day non-profit adjustment breakdown
+  dailyRDAdjustment?: DailyRD90DayAdjustmentDetails;
+  final90DayCollectionCount?: number;
+  actualFinal90DayDeposits?: number;
+  required90DayAmount?: number;
+  nonProfitAmountA?: number;
+  adjustedPrincipalX?: number;
+  calculationResultY?: number;
+  roundedY?: number;
+  postMaturityDeposits?: number;
+}
+
+export interface DailyRD90DayAdjustmentDetails {
+  totalActualDeposits: number;
+  depositsDuringRDPeriod?: number;
+  postMaturityDeposits?: number;
+  final90DayCollectionCount: number;
+  actualFinal90DayDeposits: number;
+  required90DayAmount: number;
+  nonProfitAmountA: number; // A
+  adjustedPrincipalX: number; // X
+  calculationResultY: number; // unrounded Y (e.g. 31337.55)
+  roundedY: number; // Rounded Y (e.g. 31338)
+  finalMaturityAmount: number; // Rounded Y + A (e.g. 38338)
+  totalInterest: number; // Interest portion (e.g. 1838)
+  dailyInstallment: number;
+  firstInstallmentDate?: string;
+  maturityDate?: string;
+  periodStartDate?: string;
+}
+
+export interface DaySheetCustomer {
+  customerName: string;
+  membershipId: string;
+  bondNumber: string;
+  transactionCount: number;
+  totalDeposited: number;
 }
 
 

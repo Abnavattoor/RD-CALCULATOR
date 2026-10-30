@@ -72,6 +72,20 @@ export function roundMoney(value: number): number {
 }
 
 /**
+ * Final rounding rule for calculated maturity amount:
+ * - Below ₹0.50: round down.
+ * - ₹0.50 or above: round up.
+ */
+export function roundMaturityAmount(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  const intPart = Math.floor(value);
+  const fracPart = value - intPart;
+  return fracPart >= 0.5 ? intPart + 1 : intPart;
+}
+
+export const roundMaturityY = roundMaturityAmount;
+
+/**
  * Formats a numeric value into INR currency format (e.g. ₹36,500.00).
  */
 export function formatCurrency(value: number): string {

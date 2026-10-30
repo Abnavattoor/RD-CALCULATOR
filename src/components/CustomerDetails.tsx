@@ -4,9 +4,10 @@ import { User, Hash, Tag, Calendar, CheckCircle2 } from 'lucide-react';
 
 interface CustomerDetailsProps {
   data: RDAccountData;
+  onSelectCustomer?: (customerKey: string) => void;
 }
 
-export const CustomerDetails: React.FC<CustomerDetailsProps> = ({ data }) => {
+export const CustomerDetails: React.FC<CustomerDetailsProps> = ({ data, onSelectCustomer }) => {
   return (
     <div className="w-full max-w-5xl mx-auto px-4 mt-8 mb-6">
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
@@ -16,7 +17,7 @@ export const CustomerDetails: React.FC<CustomerDetailsProps> = ({ data }) => {
           </h2>
           <div className="flex items-center gap-1.5 text-xs text-blue-700 bg-blue-50 border border-blue-100 px-2.5 py-1 rounded font-medium">
             <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
-            <span>Validated RD Ledger</span>
+            <span>{data.isDaySheet ? 'Validated Day Sheet' : 'Validated RD Ledger'}</span>
           </div>
         </div>
 
@@ -43,7 +44,7 @@ export const CustomerDetails: React.FC<CustomerDetailsProps> = ({ data }) => {
             </div>
             <div>
               <span className="text-xs uppercase tracking-wider font-semibold text-gray-400 block">
-                A/c No
+                {data.isDaySheet ? 'Bond / A/c No' : 'A/c No'}
               </span>
               <span className="text-base font-bold text-gray-900 mt-0.5 block font-mono">
                 {data.accountNumber}
@@ -76,6 +77,30 @@ export const CustomerDetails: React.FC<CustomerDetailsProps> = ({ data }) => {
             </div>
           </div>
         </div>
+
+        {/* Multi-customer Day Sheet Selector */}
+        {data.isDaySheet && data.daySheetCustomers && data.daySheetCustomers.length > 1 && (
+          <div className="mt-5 pt-4 border-t border-gray-100 flex flex-wrap items-center justify-between gap-3 bg-gray-50 p-3 rounded-lg">
+            <div className="text-xs font-semibold text-gray-700">
+              Select Customer / Bond ({data.daySheetCustomers.length} accounts found in Day Sheet):
+            </div>
+            <select
+              aria-label="Select Customer / Bond"
+              className="text-xs border border-gray-300 rounded px-3 py-1.5 bg-white text-gray-900 font-medium shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={data.selectedCustomerKey || data.customerName}
+              onChange={(e) => onSelectCustomer && onSelectCustomer(e.target.value)}
+            >
+              {data.daySheetCustomers.map((cust) => {
+                const key = cust.customerName || cust.bondNumber || cust.membershipId;
+                return (
+                  <option key={key} value={key}>
+                    {cust.customerName} (Bond: {cust.bondNumber}, {cust.transactionCount} deposits, ₹{cust.totalDeposited.toFixed(2)})
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+        )}
 
         {/* Warning banner if fields need verification */}
         {data.missingFieldsWarning && (
