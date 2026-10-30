@@ -94,6 +94,16 @@ export class ImageDocumentAdapter implements DocumentAdapter {
 
     return {
       ...ocrData,
+      openingDate: options?.openingDate || ocrData.openingDate,
+      tenureDays: options?.tenureDays || ocrData.tenureDays,
+      configuredDailyInstallment: options?.contractualDailyInstallment ?? ocrData.configuredDailyInstallment,
+      configuredMonthlyInstallment: options?.contractualMonthlyInstallment ?? ocrData.configuredMonthlyInstallment,
+      configuredOpeningDate: options?.openingDate,
+      configuredTenureDays: options?.tenureDays,
+      configuredTenureMonths: options?.tenureMonths,
+      configuredAnnualRate: options?.annualInterestRate,
+      expectedMaturityAmount: options?.expectedMaturityAmount,
+      expectedMaturityDate: options?.expectedMaturityDate,
       fileName: file.name,
       fileSize: file.size,
       documentFormat: 'Image',

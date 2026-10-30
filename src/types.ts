@@ -94,6 +94,7 @@ export interface RDAccountData {
   status?: string;
   period?: string;
   tenureDays?: number;
+  tenureMonths?: number;
   transactions: LedgerTransactionRow[];
 
   totalDeposited: number;
@@ -149,6 +150,13 @@ export interface RDAccountData {
   extractionWarnings?: string[];
   rawExtractionConfidence?: number;
   configuredDailyInstallment?: number;
+  configuredMonthlyInstallment?: number;
+  configuredOpeningDate?: string;
+  configuredTenureDays?: number;
+  configuredTenureMonths?: number;
+  configuredAnnualRate?: number;
+  expectedMaturityAmount?: number;
+  expectedMaturityDate?: string;
 
   // Day Sheet fields
   isDaySheet?: boolean;

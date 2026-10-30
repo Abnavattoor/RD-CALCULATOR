@@ -17,6 +17,13 @@ export type DocumentCategory =
 export interface DocumentAdapterOptions {
   rdType?: RDType;
   contractualDailyInstallment?: number;
+  contractualMonthlyInstallment?: number;
+  openingDate?: string;
+  tenureDays?: number;
+  tenureMonths?: number;
+  annualInterestRate?: number;
+  expectedMaturityAmount?: number;
+  expectedMaturityDate?: string;
   onStatusUpdate?: (status: string) => void;
 }
 

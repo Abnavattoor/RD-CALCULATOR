@@ -427,6 +427,41 @@ export const MaturityResult: React.FC<MaturityResultProps> = ({
         </div>
 
         {/* ==================================================================
+            EXPECTED VS FINAL MATURITY COMPARISON (DAILY & MONTHLY RD)
+        ================================================================== */}
+
+        {data.expectedMaturityAmount !== undefined && data.expectedMaturityAmount > 0 && (
+          <div className="px-6 sm:px-8 pt-4">
+            <div className="rounded-2xl bg-indigo-50/80 border border-indigo-200/80 p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="p-2 rounded-xl bg-indigo-100 text-indigo-700 shrink-0 mt-0.5">
+                  <Calculator className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-700 block">
+                    Estimated Maturity Amount — Before Ledger Verification
+                  </span>
+                  <div className="text-xl sm:text-2xl font-bold font-mono text-indigo-950 mt-0.5">
+                    {formatCurrency(data.expectedMaturityAmount)}
+                  </div>
+                  <p className="text-xs text-indigo-700/80 mt-1">
+                    {isMonthly
+                      ? `Contractual estimate based on ₹${(data.configuredMonthlyInstallment || 1000).toLocaleString()}/month for ${data.tenureMonths || 12} months (preliminary estimate based on contractual schedule before ledger verification).`
+                      : `Contractual estimate based on ₹${(data.configuredDailyInstallment || 100).toLocaleString()}/day for ${data.tenureDays || 365} days (does not depend on actual deposits or 90-day adjustment).`}
+                  </p>
+                </div>
+              </div>
+              <div className="text-xs text-indigo-900 bg-white/80 border border-indigo-200 rounded-xl px-3.5 py-2 shrink-0">
+                <span className="font-bold text-gray-700 block">Final Verified Maturity:</span>
+                <span className="font-mono font-extrabold text-blue-700 text-sm block">
+                  {formatCurrency(data.maturityAmount)}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ==================================================================
             FINANCIAL SUMMARY
         ================================================================== */}
 

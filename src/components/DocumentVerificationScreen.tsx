@@ -159,6 +159,7 @@ export const DocumentVerificationScreen: React.FC<DocumentVerificationScreenProp
   };
 
   const handleConfirm = () => {
+    const isMonthly = data.rdType === 'Monthly RD';
     const verifiedData: RDAccountData = {
       ...data,
       customerName: customerName.trim(),
@@ -168,7 +169,8 @@ export const DocumentVerificationScreen: React.FC<DocumentVerificationScreenProp
       transactions,
       totalDeposited: roundedTotalDeposits,
       validTransactionCount: validTxnCount,
-      configuredDailyInstallment: dailyInstallment,
+      configuredDailyInstallment: !isMonthly ? dailyInstallment : undefined,
+      configuredMonthlyInstallment: isMonthly ? dailyInstallment : undefined,
     };
 
     onConfirmAndCalculate(verifiedData, dailyInstallment);
@@ -364,6 +366,39 @@ export const DocumentVerificationScreen: React.FC<DocumentVerificationScreenProp
                 className="w-24 bg-white border border-blue-200 rounded-xl px-3 py-1.5 text-sm font-bold text-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <span className="text-xs text-blue-700">/ day</span>
+            </div>
+          </div>
+        )}
+
+        {/* Monthly RD Specific Contractual Installment Confirmation */}
+        {data.rdType === 'Monthly RD' && (
+          <div className="mt-5 p-4 rounded-2xl bg-emerald-50/60 border border-emerald-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-emerald-600 text-white shrink-0">
+                <Coins className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-emerald-900">Contractual Monthly Installment</div>
+                <div className="text-[11px] text-emerald-700">
+                  Total scheduled deposits ({data.tenureMonths || 12} months) = ₹{dailyInstallment.toLocaleString()} × {data.tenureMonths || 12} ={' '}
+                  <span className="font-extrabold text-emerald-900">
+                    ₹{(dailyInstallment * (data.tenureMonths || 12)).toLocaleString()}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 self-start sm:self-center">
+              <span className="text-xs font-bold text-emerald-800">₹</span>
+              <input
+                type="number"
+                min="100"
+                step="100"
+                value={dailyInstallment}
+                onChange={(e) => setDailyInstallment(Math.max(100, parseFloat(e.target.value) || 1000))}
+                className="w-28 bg-white border border-emerald-200 rounded-xl px-3 py-1.5 text-sm font-bold text-emerald-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+              <span className="text-xs text-emerald-700">/ month</span>
             </div>
           </div>
         )}

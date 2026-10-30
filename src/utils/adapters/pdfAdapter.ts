@@ -178,6 +178,16 @@ export class PDFDocumentAdapter implements DocumentAdapter {
 
     return {
       ...rawData,
+      openingDate: options?.openingDate || rawData.openingDate,
+      tenureDays: options?.tenureDays || rawData.tenureDays,
+      configuredDailyInstallment: options?.contractualDailyInstallment ?? rawData.configuredDailyInstallment,
+      configuredMonthlyInstallment: options?.contractualMonthlyInstallment ?? rawData.configuredMonthlyInstallment,
+      configuredOpeningDate: options?.openingDate,
+      configuredTenureDays: options?.tenureDays,
+      configuredTenureMonths: options?.tenureMonths,
+      configuredAnnualRate: options?.annualInterestRate,
+      expectedMaturityAmount: options?.expectedMaturityAmount,
+      expectedMaturityDate: options?.expectedMaturityDate,
       fileName: file.name,
       fileSize: file.size,
       documentFormat: 'PDF',

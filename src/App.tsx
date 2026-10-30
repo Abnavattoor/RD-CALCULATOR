@@ -21,7 +21,8 @@ import { ErrorAlert } from './components/ErrorAlert';
 import { InterestRateSelection } from './components/InterestRateSelection';
 import { PreClosureCalculator } from './components/PreClosureCalculator';
 import { DailyRDInterestCalculator } from './components/DailyRDInterestCalculator';
-import { DailyInstallmentInput } from './components/DailyInstallmentInput';
+import { DailyInstallmentInput, DailyRDConfigPayload } from './components/DailyInstallmentInput';
+import { MonthlyInstallmentInput, MonthlyRDConfigPayload } from './components/MonthlyInstallmentInput';
 import { DocumentVerificationScreen } from './components/DocumentVerificationScreen';
 import { RDDocumentProcessingError } from './utils/imageParser';
 
@@ -55,7 +56,19 @@ export default function App() {
   const [error, setError] = useState<RDParseError | null>(null);
   const [selectedRDType, setSelectedRDType] = useState<RDSelection | null>(null);
   const [contractualDailyInstallment, setContractualDailyInstallment] = useState<number>(100);
+  const [dailyOpeningDate, setDailyOpeningDate] = useState<string>('24-10-2025');
+  const [dailyTenureDays, setDailyTenureDays] = useState<number>(365);
+  const [dailyExpectedMaturityAmount, setDailyExpectedMaturityAmount] = useState<number>(0);
+  const [dailyExpectedMaturityDate, setDailyExpectedMaturityDate] = useState<string>('');
   const [isConfiguringDailyInstallment, setIsConfiguringDailyInstallment] = useState<boolean>(false);
+
+  // Monthly RD Configuration state
+  const [contractualMonthlyInstallment, setContractualMonthlyInstallment] = useState<number>(1000);
+  const [monthlyOpeningDate, setMonthlyOpeningDate] = useState<string>('24-10-2025');
+  const [monthlyTenureMonths, setMonthlyTenureMonths] = useState<number>(12);
+  const [monthlyExpectedMaturityAmount, setMonthlyExpectedMaturityAmount] = useState<number>(0);
+  const [monthlyExpectedMaturityDate, setMonthlyExpectedMaturityDate] = useState<string>('');
+  const [isConfiguringMonthlyInstallment, setIsConfiguringMonthlyInstallment] = useState<boolean>(false);
 
   const [selectedInterestRate, setSelectedInterestRate] = useState<number>(12);
   const [calculationMode, setCalculationMode] = useState<CalculationMode | null>(null);
@@ -71,7 +84,17 @@ export default function App() {
     setExtractedAccountData(null);
     setIsVerifying(false);
     setIsConfiguringDailyInstallment(false);
+    setIsConfiguringMonthlyInstallment(false);
     setContractualDailyInstallment(100);
+    setContractualMonthlyInstallment(1000);
+    setDailyOpeningDate('24-10-2025');
+    setMonthlyOpeningDate('24-10-2025');
+    setDailyTenureDays(365);
+    setMonthlyTenureMonths(12);
+    setDailyExpectedMaturityAmount(0);
+    setMonthlyExpectedMaturityAmount(0);
+    setDailyExpectedMaturityDate('');
+    setMonthlyExpectedMaturityDate('');
     setError(null);
     setSelectedInterestRate(12);
   };
@@ -85,14 +108,34 @@ export default function App() {
     setError(null);
     if (type === 'Daily RD') {
       setIsConfiguringDailyInstallment(true);
+      setIsConfiguringMonthlyInstallment(false);
+    } else if (type === 'Monthly RD') {
+      setIsConfiguringMonthlyInstallment(true);
+      setIsConfiguringDailyInstallment(false);
     } else {
       setIsConfiguringDailyInstallment(false);
+      setIsConfiguringMonthlyInstallment(false);
     }
   };
 
-  const handleDailyInstallmentContinue = (installmentAmount: number) => {
-    setContractualDailyInstallment(installmentAmount);
+  const handleDailyInstallmentContinue = (config: DailyRDConfigPayload) => {
+    setContractualDailyInstallment(config.installmentAmount);
+    setDailyOpeningDate(config.displayOpeningDate);
+    setDailyTenureDays(config.tenureDays);
+    setSelectedInterestRate(config.annualInterestRate);
+    setDailyExpectedMaturityAmount(config.expectedMaturityAmount);
+    setDailyExpectedMaturityDate(config.expectedMaturityDate);
     setIsConfiguringDailyInstallment(false);
+  };
+
+  const handleMonthlyInstallmentContinue = (config: MonthlyRDConfigPayload) => {
+    setContractualMonthlyInstallment(config.installmentAmount);
+    setMonthlyOpeningDate(config.displayOpeningDate);
+    setMonthlyTenureMonths(config.tenureMonths);
+    setSelectedInterestRate(config.annualInterestRate);
+    setMonthlyExpectedMaturityAmount(config.expectedMaturityAmount);
+    setMonthlyExpectedMaturityDate(config.expectedMaturityDate);
+    setIsConfiguringMonthlyInstallment(false);
   };
 
   // ===========================================================================
@@ -122,6 +165,12 @@ export default function App() {
       {
         ...switched,
         configuredDailyInstallment: contractualDailyInstallment,
+        openingDate: dailyOpeningDate || switched.openingDate,
+        configuredOpeningDate: dailyOpeningDate,
+        tenureDays: dailyTenureDays || switched.tenureDays,
+        configuredTenureDays: dailyTenureDays,
+        expectedMaturityAmount: dailyExpectedMaturityAmount,
+        expectedMaturityDate: dailyExpectedMaturityDate,
       },
       activeRate
     );
@@ -146,9 +195,17 @@ export default function App() {
         throw new Error('Please select Daily RD or Monthly RD before uploading the ledger.');
       }
 
+      const isMonthly = selectedRDType === 'Monthly RD';
       const parsedData = await processMultiFormatDocument(file, {
         rdType: selectedRDType,
-        contractualDailyInstallment,
+        contractualDailyInstallment: !isMonthly ? contractualDailyInstallment : undefined,
+        contractualMonthlyInstallment: isMonthly ? contractualMonthlyInstallment : undefined,
+        openingDate: isMonthly ? monthlyOpeningDate : dailyOpeningDate,
+        tenureDays: !isMonthly ? dailyTenureDays : undefined,
+        tenureMonths: isMonthly ? monthlyTenureMonths : undefined,
+        annualInterestRate: selectedInterestRate,
+        expectedMaturityAmount: isMonthly ? monthlyExpectedMaturityAmount : dailyExpectedMaturityAmount,
+        expectedMaturityDate: isMonthly ? monthlyExpectedMaturityDate : dailyExpectedMaturityDate,
         onStatusUpdate: (msg) => setProcessingStatus(msg),
       });
 
@@ -221,20 +278,59 @@ export default function App() {
     verifiedData: RDAccountData,
     confirmedInstallment: number
   ) => {
-    setContractualDailyInstallment(confirmedInstallment);
+    const isDaily = verifiedData.rdType === 'Daily RD';
+    const isMonthly = verifiedData.rdType === 'Monthly RD';
 
-    const initialRate = getDefaultRateForDuration(
-      verifiedData.rdType as any,
-      verifiedData.rdType === 'Daily RD' ? verifiedData.tenureDays || 365 : 12
-    );
+    if (isDaily) {
+      setContractualDailyInstallment(confirmedInstallment);
+    } else if (isMonthly) {
+      setContractualMonthlyInstallment(confirmedInstallment);
+    }
+
+    const initialRate =
+      selectedInterestRate ||
+      getDefaultRateForDuration(
+        verifiedData.rdType as any,
+        isDaily
+          ? verifiedData.tenureDays || dailyTenureDays || 365
+          : verifiedData.tenureMonths || monthlyTenureMonths || 12
+      );
 
     const preparedData: RDAccountData = {
       ...verifiedData,
-      configuredDailyInstallment: confirmedInstallment,
-      dailySchemeAmount:
-        verifiedData.rdType === 'Daily RD'
-          ? confirmedInstallment
-          : verifiedData.dailySchemeAmount,
+      configuredDailyInstallment: isDaily ? confirmedInstallment : undefined,
+      configuredMonthlyInstallment: isMonthly ? confirmedInstallment : undefined,
+      openingDate: isDaily
+        ? (dailyOpeningDate || verifiedData.openingDate)
+        : isMonthly
+        ? (monthlyOpeningDate || verifiedData.openingDate)
+        : verifiedData.openingDate,
+      configuredOpeningDate: isDaily
+        ? dailyOpeningDate
+        : isMonthly
+        ? monthlyOpeningDate
+        : verifiedData.configuredOpeningDate,
+      tenureDays: isDaily
+        ? (dailyTenureDays || verifiedData.tenureDays || 365)
+        : verifiedData.tenureDays,
+      configuredTenureDays: isDaily ? dailyTenureDays : undefined,
+      tenureMonths: isMonthly
+        ? (monthlyTenureMonths || verifiedData.tenureMonths || 12)
+        : verifiedData.tenureMonths,
+      configuredTenureMonths: isMonthly ? monthlyTenureMonths : undefined,
+      expectedMaturityAmount: isDaily
+        ? dailyExpectedMaturityAmount
+        : isMonthly
+        ? monthlyExpectedMaturityAmount
+        : verifiedData.expectedMaturityAmount,
+      expectedMaturityDate: isDaily
+        ? dailyExpectedMaturityDate
+        : isMonthly
+        ? monthlyExpectedMaturityDate
+        : verifiedData.expectedMaturityDate,
+      dailySchemeAmount: isDaily
+        ? confirmedInstallment
+        : verifiedData.dailySchemeAmount,
     };
 
     const calculated = recalculateRDWithRate(preparedData, initialRate);
@@ -258,7 +354,17 @@ export default function App() {
     setExtractedAccountData(null);
     setIsVerifying(false);
     setIsConfiguringDailyInstallment(false);
+    setIsConfiguringMonthlyInstallment(false);
     setContractualDailyInstallment(100);
+    setContractualMonthlyInstallment(1000);
+    setDailyOpeningDate('24-10-2025');
+    setMonthlyOpeningDate('24-10-2025');
+    setDailyTenureDays(365);
+    setMonthlyTenureMonths(12);
+    setDailyExpectedMaturityAmount(0);
+    setMonthlyExpectedMaturityAmount(0);
+    setDailyExpectedMaturityDate('');
+    setMonthlyExpectedMaturityDate('');
     setError(null);
     setSelectedRDType(null);
     setSelectedInterestRate(12);
@@ -569,10 +675,31 @@ export default function App() {
             isConfiguringDailyInstallment && (
               <DailyInstallmentInput
                 initialAmount={contractualDailyInstallment}
+                initialOpeningDate={dailyOpeningDate}
+                initialTenureDays={dailyTenureDays}
+                initialAnnualRate={selectedInterestRate}
                 onContinue={handleDailyInstallmentContinue}
                 onBack={() => {
                   setSelectedRDType(null);
                   setIsConfiguringDailyInstallment(false);
+                }}
+              />
+            )}
+
+          {/* MONTHLY RD INSTALLMENT INPUT SCREEN (Step 2 of Monthly RD Maturity workflow) */}
+          {calculationMode &&
+            calculationMode !== 'Daily-Interest' &&
+            selectedRDType === 'Monthly RD' &&
+            isConfiguringMonthlyInstallment && (
+              <MonthlyInstallmentInput
+                initialAmount={contractualMonthlyInstallment}
+                initialOpeningDate={monthlyOpeningDate}
+                initialTenureMonths={monthlyTenureMonths}
+                initialAnnualRate={selectedInterestRate}
+                onContinue={handleMonthlyInstallmentContinue}
+                onBack={() => {
+                  setSelectedRDType(null);
+                  setIsConfiguringMonthlyInstallment(false);
                 }}
               />
             )}
@@ -582,6 +709,7 @@ export default function App() {
             calculationMode !== 'Daily-Interest' &&
             selectedRDType &&
             !isConfiguringDailyInstallment &&
+            !isConfiguringMonthlyInstallment &&
             !isVerifying &&
             !accountData && (
               <div className="mt-8 max-w-4xl mx-auto">
@@ -597,7 +725,9 @@ export default function App() {
                     <span>
                       {selectedRDType}
                       {selectedRDType === 'Daily RD' &&
-                        ` (₹${contractualDailyInstallment.toLocaleString()} / day)`}
+                        ` (₹${contractualDailyInstallment.toLocaleString()} / day • ${dailyOpeningDate} • ${dailyTenureDays} days)`}
+                      {selectedRDType === 'Monthly RD' &&
+                        ` (₹${contractualMonthlyInstallment.toLocaleString()} / month • ${monthlyOpeningDate} • ${monthlyTenureMonths} months)`}
                     </span>
                   </div>
                 </div>
@@ -635,6 +765,8 @@ export default function App() {
                     onClick={() => {
                       if (selectedRDType === 'Daily RD') {
                         setIsConfiguringDailyInstallment(true);
+                      } else if (selectedRDType === 'Monthly RD') {
+                        setIsConfiguringMonthlyInstallment(true);
                       } else {
                         setSelectedRDType(null);
                       }
@@ -646,6 +778,8 @@ export default function App() {
                   >
                     {selectedRDType === 'Daily RD'
                       ? '← Back to Daily Installment'
+                      : selectedRDType === 'Monthly RD'
+                      ? '← Back to Monthly Installment'
                       : '← Back to RD Type'}
                   </button>
                 </div>
@@ -767,7 +901,11 @@ export default function App() {
         {calculationMode !== 'Daily-Interest' && isVerifying && extractedAccountData && (
           <DocumentVerificationScreen
             data={extractedAccountData}
-            contractualDailyInstallment={contractualDailyInstallment}
+            contractualDailyInstallment={
+              extractedAccountData.rdType === 'Monthly RD'
+                ? contractualMonthlyInstallment
+                : contractualDailyInstallment
+            }
             onConfirmAndCalculate={handleConfirmVerification}
             onSelectCustomer={handleSelectCustomer}
             onCancel={handleCancelVerification}

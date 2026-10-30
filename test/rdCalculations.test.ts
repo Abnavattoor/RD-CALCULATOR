@@ -2314,6 +2314,299 @@ describe('RD Calculation & Interest-Rate Controls Test Suite', () => {
         assert.equal(res.adjustedPrincipalX, 38000);
       });
     });
+
+    // =========================================================================
+    // 8. Daily RD Configuration Screen — Opening Date, Tenure, and Expected Maturity
+    // =========================================================================
+    describe('8. Daily RD Configuration Screen — Opening Date, Tenure, and Expected Maturity', () => {
+      function addDays(d: Date, days: number): Date {
+        const res = new Date(d);
+        res.setDate(res.getDate() + days);
+        return res;
+      }
+
+      function formatTestDate(d: Date): string {
+        const day = String(d.getDate()).padStart(2, '0');
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const year = d.getFullYear();
+        return `${day}-${month}-${year}`;
+      }
+
+      test('Scenario 1: ₹100/day, opening date 24-10-2025, tenure 365 days (1 Year) @ 12.0%', () => {
+        const openingDate = new Date(2025, 9, 24); // 24 Oct 2025
+        const tenureDays = 365;
+        const installment = 100;
+        const rate = 12.0;
+
+        // Maturity Date = Opening Date + Selected Tenure Days
+        const expectedMaturityDate = addDays(openingDate, tenureDays);
+        assert.equal(formatTestDate(expectedMaturityDate), '24-10-2026');
+
+        // Required 90-Day Amount = Contractual Daily Installment × 90
+        const required90Day = installment * 90;
+        assert.equal(required90Day, 9000);
+
+        // Expected Maturity Amount using existing company Excel formula
+        const calc = calculateDailyRDMaturity(tenureDays, installment, rate);
+        assert.equal(calc.totalDeposited, 36500);
+        assert.equal(calc.maturityAmount, 38773.57);
+        assert.equal(calc.totalInterest, 2273.57);
+        assert.equal(roundMoney(calc.rawMaturityAmount || 0), 38773.57);
+      });
+
+      test('Scenario 2: ₹200/day, opening date 24-10-2025, tenure 730 days (2 Years) @ 12.0%', () => {
+        const openingDate = new Date(2025, 9, 24); // 24 Oct 2025
+        const tenureDays = 730;
+        const installment = 200;
+        const rate = 12.0;
+
+        // Maturity Date = Opening Date + Selected Tenure Days
+        const expectedMaturityDate = addDays(openingDate, tenureDays);
+        assert.equal(formatTestDate(expectedMaturityDate), '24-10-2027');
+
+        // Required 90-Day Amount = Contractual Daily Installment × 90
+        const required90Day = installment * 90;
+        assert.equal(required90Day, 18000);
+
+        // Expected Maturity Amount using existing company Excel formula
+        const calc = calculateDailyRDMaturity(tenureDays, installment, rate);
+        assert.equal(calc.totalDeposited, 146000);
+        assert.equal(calc.maturityAmount, 164979.42);
+        assert.equal(calc.totalInterest, 18979.42);
+        assert.equal(roundMoney(calc.rawMaturityAmount || 0), 164979.42);
+      });
+
+      test('Scenario 3: ₹500/day, opening date 24-10-2025, tenure 1,095 days (3 Years) @ 12.0%', () => {
+        const openingDate = new Date(2025, 9, 24); // 24 Oct 2025
+        const tenureDays = 1095;
+        const installment = 500;
+        const rate = 12.0;
+
+        // Maturity Date = Opening Date + Selected Tenure Days (2028 is leap year)
+        const expectedMaturityDate = addDays(openingDate, tenureDays);
+        assert.equal(formatTestDate(expectedMaturityDate), '23-10-2028');
+
+        // Required 90-Day Amount = Contractual Daily Installment × 90
+        const required90Day = installment * 90;
+        assert.equal(required90Day, 45000);
+
+        // Expected Maturity Amount using existing company Excel formula
+        const calc = calculateDailyRDMaturity(tenureDays, installment, rate);
+        assert.equal(calc.totalDeposited, 547500);
+        assert.equal(calc.maturityAmount, 658892.87);
+        assert.equal(calc.totalInterest, 111392.87);
+        assert.equal(roundMoney(calc.rawMaturityAmount || 0), 658892.87);
+      });
+
+      test('Separation of Expected Maturity Amount and Final Verified Maturity Amount', () => {
+        // Customer uploaded ledger with total actual deposits of ₹36,600 and excess 90-day deposit
+        const openingDate = new Date(2025, 9, 24);
+        const tenureDays = 365;
+        const contractualInstallment = 100;
+        const rate = 12.0;
+
+        // 1. Expected Maturity Amount before upload
+        const expectedCalc = calculateDailyRDMaturity(tenureDays, contractualInstallment, rate);
+        const expectedMaturityAmount = expectedCalc.maturityAmount;
+        assert.equal(expectedMaturityAmount, 38773.57);
+
+        // 2. Final Verified Maturity Amount after ledger upload with transactions
+        // Suppose transaction has ₹36,600 in the final 90 days
+        const txns: LedgerTransactionRow[] = [
+          {
+            rowNum: 1,
+            date: '20/10/2026',
+            depositDateObj: new Date(2026, 9, 20),
+            particulars: 'RCD 1YR',
+            receiptCredit: 36600,
+            rawReceiptCredit: 36600,
+            isSummaryRow: false,
+            isValidPayment: true,
+          },
+        ];
+
+        const finalResult = calculateDailyRDNonProfitMaturity(
+          txns,
+          36600,
+          contractualInstallment,
+          rate,
+          tenureDays,
+          openingDate,
+          null
+        );
+
+        // Required 90-day amount = 100 * 90 = 9000
+        assert.equal(finalResult.required90DayAmount, 9000);
+        // Non-profit A = 36600 - 9000 = 27600
+        assert.equal(finalResult.nonProfitAmountA, 27600);
+        // Adjusted principal X = 36600 - 27600 = 9000
+        assert.equal(finalResult.adjustedPrincipalX, 9000);
+        // Final maturity amount = Rounded Y + A
+        assert.equal(finalResult.maturityAmount, finalResult.roundedY + finalResult.nonProfitAmountA);
+
+        // Verify that expected and final maturity amounts remain distinctly separate
+        assert.notEqual(expectedMaturityAmount, finalResult.maturityAmount);
+        assert.equal(expectedMaturityAmount, 38773.57);
+      });
+    });
+
+    describe('Suite 9: Monthly RD Configuration Screen — Opening Date, Tenure, and Expected Maturity', () => {
+      test('Scenario 1: ₹1,000/month, 12 months tenure, opening date 24-10-2025 at 12.0% p.a.', () => {
+        const monthlyInstallment = 1000;
+        const tenureMonths = 12;
+        const rate = 12.0;
+        const openingDateStr = '24-10-2025';
+
+        // 1. Total Scheduled Deposit Amount = Monthly Installment × Number of Months
+        const totalScheduledDeposits = monthlyInstallment * tenureMonths;
+        assert.equal(totalScheduledDeposits, 12000);
+
+        // 2. Expected Maturity Date = Opening Date + 12 Months -> 24-10-2026
+        const [d, m, y] = openingDateStr.split('-').map(Number);
+        const openingDate = new Date(y, m - 1, d);
+        const expectedMaturityDate = new Date(openingDate);
+        expectedMaturityDate.setMonth(expectedMaturityDate.getMonth() + tenureMonths);
+        assert.equal(expectedMaturityDate.getFullYear(), 2026);
+        assert.equal(expectedMaturityDate.getMonth(), 9); // October (0-indexed: 9)
+        assert.equal(expectedMaturityDate.getDate(), 24);
+
+        // 3. Expected Maturity Amount using existing Monthly RD formula
+        const maturityCalc = calculateMonthlyRDMaturity(tenureMonths, monthlyInstallment, rate);
+        assert.equal(maturityCalc.totalDeposited, 12000.0);
+        assert.equal(maturityCalc.totalInterest, 809.33);
+        assert.equal(maturityCalc.maturityAmount, 12809.33);
+      });
+
+      test('Scenario 2: ₹2,000/month, 24 months tenure, opening date 24-10-2025 at 12.0% p.a.', () => {
+        const monthlyInstallment = 2000;
+        const tenureMonths = 24;
+        const rate = 12.0;
+        const openingDateStr = '24-10-2025';
+
+        // 1. Total Scheduled Deposit Amount = ₹2,000 × 24 = ₹48,000
+        const totalScheduledDeposits = monthlyInstallment * tenureMonths;
+        assert.equal(totalScheduledDeposits, 48000);
+
+        // 2. Expected Maturity Date = Opening Date + 24 Months -> 24-10-2027
+        const [d, m, y] = openingDateStr.split('-').map(Number);
+        const openingDate = new Date(y, m - 1, d);
+        const expectedMaturityDate = new Date(openingDate);
+        expectedMaturityDate.setMonth(expectedMaturityDate.getMonth() + tenureMonths);
+        assert.equal(expectedMaturityDate.getFullYear(), 2027);
+        assert.equal(expectedMaturityDate.getMonth(), 9);
+        assert.equal(expectedMaturityDate.getDate(), 24);
+
+        // 3. Expected Maturity Amount using existing Monthly RD formula
+        const maturityCalc = calculateMonthlyRDMaturity(tenureMonths, monthlyInstallment, rate);
+        assert.equal(maturityCalc.totalDeposited, 48000.0);
+        assert.equal(maturityCalc.totalInterest, 6486.40);
+        assert.equal(maturityCalc.maturityAmount, 54486.40);
+      });
+
+      test('Scenario 3: ₹5,000/month, 36 months tenure, opening date 24-10-2025 at 12.0% p.a.', () => {
+        const monthlyInstallment = 5000;
+        const tenureMonths = 36;
+        const rate = 12.0;
+        const openingDateStr = '24-10-2025';
+
+        // 1. Total Scheduled Deposit Amount = ₹5,000 × 36 = ₹1,80,000
+        const totalScheduledDeposits = monthlyInstallment * tenureMonths;
+        assert.equal(totalScheduledDeposits, 180000);
+
+        // 2. Expected Maturity Date = Opening Date + 36 Months -> 24-10-2028
+        const [d, m, y] = openingDateStr.split('-').map(Number);
+        const openingDate = new Date(y, m - 1, d);
+        const expectedMaturityDate = new Date(openingDate);
+        expectedMaturityDate.setMonth(expectedMaturityDate.getMonth() + tenureMonths);
+        assert.equal(expectedMaturityDate.getFullYear(), 2028);
+        assert.equal(expectedMaturityDate.getMonth(), 9);
+        assert.equal(expectedMaturityDate.getDate(), 24);
+
+        // 3. Expected Maturity Amount using existing Monthly RD formula
+        const maturityCalc = calculateMonthlyRDMaturity(tenureMonths, monthlyInstallment, rate);
+        assert.equal(maturityCalc.totalDeposited, 180000.0);
+        assert.equal(maturityCalc.totalInterest, 37538.24);
+        assert.equal(maturityCalc.maturityAmount, 217538.24);
+      });
+
+      test('Separation of Expected Maturity Amount and Final Verified Maturity Amount in Monthly RD', () => {
+        // Contractual schedule: ₹2,000/month, 24 months @ 12%
+        const contractualMonthlyInstallment = 2000;
+        const tenureMonths = 24;
+        const rate = 12.0;
+
+        // 1. Pre-upload Expected Maturity Amount
+        const expectedCalc = calculateMonthlyRDMaturity(tenureMonths, contractualMonthlyInstallment, rate);
+        const expectedMaturityAmount = expectedCalc.maturityAmount;
+        assert.equal(expectedMaturityAmount, 54486.40);
+
+        // 2. Post-upload: Customer uploaded ledger with 12 regular installments instead of 24
+        const dates = [
+          '24/10/2025', '24/11/2025', '24/12/2025', '24/01/2026',
+          '24/02/2026', '24/03/2026', '24/04/2026', '24/05/2026',
+          '24/06/2026', '24/07/2026', '24/08/2026', '24/09/2026',
+        ];
+        let runningBal = 0;
+        const transactions: LedgerTransactionRow[] = dates.map((dStr, idx) => {
+          runningBal += 2000;
+          const [d, m, y] = dStr.split('/').map(Number);
+          return {
+            rowNum: idx + 1,
+            date: dStr,
+            depositDateObj: new Date(y, m - 1, d),
+            particulars: `Monthly Installment #${idx + 1}`,
+            paymentDebit: null,
+            receiptCredit: 2000,
+            rawReceiptCredit: 2000,
+            balance: runningBal,
+            intPaid: null,
+            isSummaryRow: false,
+            isValidPayment: true,
+          };
+        });
+
+        const accountData: RDAccountData = {
+          fileName: 'Customer_Actual_Monthly_Ledger.xlsx',
+          fileSize: 25000,
+          sheetName: 'Sheet1',
+          hasSummaryRow: false,
+          customerName: 'Monthly RD Customer',
+          accountNumber: 'RD-M-2025-01',
+          rdType: 'Monthly RD',
+          openingDate: '24-10-2025',
+          configuredOpeningDate: '24-10-2025',
+          tenureMonths: 24,
+          configuredTenureMonths: 24,
+          configuredMonthlyInstallment: 2000,
+          expectedMaturityAmount: expectedMaturityAmount,
+          expectedMaturityDate: '24-10-2027',
+          annualRate: 0.12,
+          selectedInterestRate: 12,
+          status: 'Active',
+          period: '24 Months',
+          transactions,
+          totalDeposited: 24000,
+          profitEligibleAmount: 24000,
+          nonProfitAmount: 0,
+          dailySchemeAmount: 0,
+          normalizedDailyAmount: 0,
+          totalInterest: 0,
+          maturityAmount: 24000,
+          validTransactionCount: 12,
+        };
+
+        const finalResult = recalculateRDWithRate(accountData, rate);
+
+        // Expected maturity amount is preserved as contractual preview
+        assert.equal(finalResult.expectedMaturityAmount, 54486.40);
+        // Final verified maturity amount reflects the actual deposited transactions
+        assert.equal(finalResult.totalDeposited, 24000);
+        assert.equal(finalResult.totalInterest, 4867.74);
+        assert.equal(finalResult.maturityAmount, 28867.74);
+        // Clear separation between pre-verification expectation and actual verified result
+        assert.notEqual(finalResult.expectedMaturityAmount, finalResult.maturityAmount);
+      });
+    });
   });
 });
 

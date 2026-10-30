@@ -236,9 +236,21 @@ export function recalculateRDWithRate(
 
   if (data.rdType === 'Daily RD') {
     const tenureDays =
-      data.tenureDays && data.tenureDays > 0
+      data.configuredTenureDays && data.configuredTenureDays > 0
+        ? data.configuredTenureDays
+        : data.tenureDays && data.tenureDays > 0
         ? data.tenureDays
         : 365;
+
+    const authoritativeOpeningDate = data.configuredOpeningDate || data.openingDate;
+    const openingDateObj = parseDate(authoritativeOpeningDate);
+    const computedMaturityDateObj = openingDateObj
+      ? new Date(
+          openingDateObj.getFullYear(),
+          openingDateObj.getMonth(),
+          openingDateObj.getDate() + tenureDays
+        )
+      : parseDate(data.maturityDate);
 
     let profitEligibleAmount: number;
     let nonProfitAmount: number;
@@ -262,8 +274,8 @@ export function recalculateRDWithRate(
         data.configuredDailyInstallment || data.dailySchemeAmount || data.normalizedDailyAmount || 100,
         safeRate,
         tenureDays,
-        parseDate(data.openingDate),
-        parseDate(data.maturityDate)
+        openingDateObj,
+        computedMaturityDateObj
       );
       profitEligibleAmount = nonProfitRes.profitEligibleAmount;
       nonProfitAmount = nonProfitRes.nonProfitAmount;
@@ -329,6 +341,12 @@ export function recalculateRDWithRate(
 
     return {
       ...data,
+
+      openingDate: authoritativeOpeningDate || data.openingDate,
+
+      maturityDate: computedMaturityDateObj ? formatDate(computedMaturityDateObj) : data.maturityDate,
+
+      tenureDays,
 
       annualRate,
 
@@ -406,32 +424,34 @@ export function recalculateRDWithRate(
 
     const periodText = data.period || '';
 
-    let tenureMonths = 0;
+    let tenureMonths = data.configuredTenureMonths || 0;
 
-    const monthMatch = periodText.match(
-      /(\d+)\s*(?:month|months|m\b)/i
-    );
-
-    const yearMatch = periodText.match(
-      /(\d+)\s*(?:year|years|y\b)/i
-    );
-
-    if (monthMatch) {
-      tenureMonths = parseInt(
-        monthMatch[1],
-        10
+    if (tenureMonths <= 0) {
+      const monthMatch = periodText.match(
+        /(\d+)\s*(?:month|months|m\b)/i
       );
-    } else if (yearMatch) {
-      tenureMonths =
-        parseInt(yearMatch[1], 10) * 12;
-    } else if (
-      data.tenureDays &&
-      data.tenureDays > 0
-    ) {
-      tenureMonths = Math.max(
-        1,
-        Math.round(data.tenureDays / (365 / 12))
+
+      const yearMatch = periodText.match(
+        /(\d+)\s*(?:year|years|y\b)/i
       );
+
+      if (monthMatch) {
+        tenureMonths = parseInt(
+          monthMatch[1],
+          10
+        );
+      } else if (yearMatch) {
+        tenureMonths =
+          parseInt(yearMatch[1], 10) * 12;
+      } else if (
+        data.tenureDays &&
+        data.tenureDays > 0
+      ) {
+        tenureMonths = Math.max(
+          1,
+          Math.round(data.tenureDays / (365 / 12))
+        );
+      }
     }
 
     if (tenureMonths <= 0) {
@@ -445,24 +465,24 @@ export function recalculateRDWithRate(
     // Determine maturity date
     // -------------------------------------------------------------------------
 
+    const authoritativeOpeningDate = data.configuredOpeningDate || data.openingDate;
+    const openingDate = parseFlexibleDate(authoritativeOpeningDate);
+
     let maturityDate =
-      parseFlexibleDate(data.maturityDate);
+      data.configuredOpeningDate && openingDate
+        ? addMonths(openingDate, tenureMonths)
+        : parseFlexibleDate(data.maturityDate);
 
     // -------------------------------------------------------------------------
     // If maturity date is not available in the ledger,
     // calculate it from the opening date + tenure.
     // -------------------------------------------------------------------------
 
-    if (!maturityDate) {
-      const openingDate =
-        parseFlexibleDate(data.openingDate);
-
-      if (openingDate) {
-        maturityDate = addMonths(
-          openingDate,
-          tenureMonths
-        );
-      }
+    if (!maturityDate && openingDate) {
+      maturityDate = addMonths(
+        openingDate,
+        tenureMonths
+      );
     }
 
     // -------------------------------------------------------------------------
@@ -632,7 +652,9 @@ export function recalculateRDWithRate(
 
     const numberOfMonths = Math.max(1, tenureMonths);
     let expectedInstallment =
-      data.schemeAmount && data.schemeAmount > 0
+      data.configuredMonthlyInstallment && data.configuredMonthlyInstallment > 0
+        ? data.configuredMonthlyInstallment
+        : data.schemeAmount && data.schemeAmount > 0
         ? data.schemeAmount
         : profitEligibleAmount > 0
         ? profitEligibleAmount / numberOfMonths
@@ -642,7 +664,7 @@ export function recalculateRDWithRate(
       expectedInstallment = 2000;
     }
 
-    const openingDateObj = parseFlexibleDate(data.openingDate);
+    const openingDateObj = parseFlexibleDate(authoritativeOpeningDate);
     const installmentSchedule: MonthlyRDInstallmentPeriod[] = [];
 
     for (let m = 1; m <= numberOfMonths; m++) {
@@ -836,10 +858,21 @@ export function recalculateRDWithRate(
 
       rolloverCalculation,
 
-      // Keep the original maturity date if supplied.
+      openingDate: authoritativeOpeningDate || data.openingDate,
+
+      // If opening date was configured, maturity date is computed as opening date + tenure
       maturityDate:
-        data.maturityDate ||
-        (maturityDate ? formatDate(maturityDate) : data.maturityDate),
+        data.configuredOpeningDate && maturityDate
+          ? formatDate(maturityDate)
+          : (data.maturityDate || (maturityDate ? formatDate(maturityDate) : data.maturityDate)),
+
+      period: `${numberOfMonths} Months`,
+
+      configuredMonthlyInstallment: data.configuredMonthlyInstallment,
+      configuredOpeningDate: data.configuredOpeningDate,
+      configuredTenureMonths: data.configuredTenureMonths,
+      expectedMaturityAmount: data.expectedMaturityAmount,
+      expectedMaturityDate: data.expectedMaturityDate,
     };
   }
 
